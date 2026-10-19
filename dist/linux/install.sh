@@ -3,15 +3,15 @@
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 bin="$HOME/.local/bin"; apps="$HOME/.local/share/applications"
-icons="$HOME/.local/share/icons/hicolor/scalable/apps"; mime="$HOME/.local/share/mime"
+icons="$HOME/.local/share/icons/hicolor/512x512/apps"; mime="$HOME/.local/share/mime"
 if [ "$1" = "--uninstall" ]; then
-  rm -f "$bin/prowave" "$apps/prowave-studio.desktop" "$icons/prowave.svg" "$mime/packages/prowave.xml"
+  rm -f "$bin/prowave" "$apps/prowave-studio.desktop" "$icons/prowave.png" "$mime/packages/prowave.xml"
   echo "Pro Wave removed."
 else
   mkdir -p "$bin" "$apps" "$icons" "$mime/packages"
   install -m 755 "$here/prowave" "$bin/prowave"
   install -m 644 "$here/prowave-studio.desktop" "$apps/"
-  install -m 644 "$here/prowave.svg" "$icons/"
+  install -m 644 "$here/prowave.png" "$icons/"
   install -m 644 "$here/prowave-mime.xml" "$mime/packages/prowave.xml"
   command -v update-mime-database >/dev/null && update-mime-database "$mime" || true
   command -v update-desktop-database >/dev/null && update-desktop-database "$apps" || true

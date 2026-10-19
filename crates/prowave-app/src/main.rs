@@ -248,6 +248,9 @@ fn init_logging() {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
+/// The Pro Wave logo, 256×256 with transparency (generated from dist/icons/prowave-1024.png).
+const APP_ICON_PNG: &[u8] = include_bytes!("../assets/icon-256.png");
+
 fn main() -> eframe::Result {
     // Release builds: on a crash, write a report to the temp folder instead of a raw panic.
     human_panic::setup_panic!(human_panic::Metadata::new(
@@ -256,12 +259,18 @@ fn main() -> eframe::Result {
     ));
     init_logging();
     project_io::remove_stale_media(std::time::Duration::from_secs(7 * 24 * 3600));
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1600.0, 980.0])
+        .with_title("Pro Wave — Untitled - Tracks")
+        // Window class: lets Linux desktops match the window to its .desktop entry and icon.
+        .with_app_id("prowave");
+    // Title bar / taskbar / dock icon. A broken icon must not stop the app from starting.
+    match eframe::icon_data::from_png_bytes(APP_ICON_PNG) {
+        Ok(icon) => viewport = viewport.with_icon(icon),
+        Err(e) => tracing::warn!("app icon could not be decoded: {e}"),
+    }
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1600.0, 980.0])
-            .with_title("Pro Wave — Untitled - Tracks")
-            // Window class: lets Linux desktops match the window to its .desktop entry and icon.
-            .with_app_id("prowave"),
+        viewport,
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -315,4 +324,14 @@ fn main() -> eframe::Result {
     // The app (and with it the engine's open media files) is gone by now.
     project_io::remove_session_media();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn app_icon_decodes_as_a_square_rgba_image() {
+        let icon = eframe::icon_data::from_png_bytes(super::APP_ICON_PNG).unwrap();
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+    }
 }

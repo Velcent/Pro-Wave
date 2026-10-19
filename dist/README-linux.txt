@@ -89,7 +89,7 @@ makes double-clicking a .prowave file open it. Undo it with:  ./install.sh --uni
 If your terminal can't find "prowave" afterwards, add ~/.local/bin to your PATH.
 
 Files in this package: prowave (program), install.sh, prowave-studio.desktop (menu entry),
-prowave.svg (icon), prowave-mime.xml (.prowave file type).
+prowave.png (icon), prowave-mime.xml (.prowave file type).
 
 Other package formats (same program, from the same release page):
 

@@ -16,7 +16,7 @@ URL:            https://prowave.invalid/
 ExclusiveArch:  x86_64
 Source0:        prowave
 Source1:        prowave-studio.desktop
-Source2:        prowave.svg
+Source2:        prowave.png
 Source3:        prowave-mime.xml
 Source4:        README.txt
 
@@ -42,13 +42,13 @@ via their ALSA plug-ins). This is an early development build.
 %install
 install -D -m 755 %{SOURCE0} %{buildroot}%{_bindir}/prowave
 install -D -m 644 %{SOURCE1} %{buildroot}%{_datadir}/applications/prowave-studio.desktop
-install -D -m 644 %{SOURCE2} %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/prowave.svg
+install -D -m 644 %{SOURCE2} %{buildroot}%{_datadir}/icons/hicolor/512x512/apps/prowave.png
 install -D -m 644 %{SOURCE3} %{buildroot}%{_datadir}/mime/packages/prowave.xml
 install -D -m 644 %{SOURCE4} %{buildroot}%{_docdir}/%{name}/README.txt
 
 %files
 %{_bindir}/prowave
 %{_datadir}/applications/prowave-studio.desktop
-%{_datadir}/icons/hicolor/scalable/apps/prowave.svg
+%{_datadir}/icons/hicolor/512x512/apps/prowave.png
 %{_datadir}/mime/packages/prowave.xml
 %doc %{_docdir}/%{name}/README.txt

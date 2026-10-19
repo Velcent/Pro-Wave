@@ -38,7 +38,7 @@ jobs:
           pkg=dist/prowave-linux-x86_64
           rm -rf "$pkg" && mkdir -p "$pkg"
           install -m 755 target/release/prowave dist/linux/install.sh "$pkg/"
-          install -m 644 dist/linux/prowave-studio.desktop dist/linux/prowave.svg \
+          install -m 644 dist/linux/prowave-studio.desktop dist/linux/prowave.png \
             dist/linux/prowave-mime.xml "$pkg/"
           install -m 644 dist/README-linux.txt "$pkg/README.txt"
           tar -C dist -czf prowave-linux-x86_64.tar.gz prowave-linux-x86_64
@@ -49,7 +49,7 @@ jobs:
           work=$(mktemp -d)
           tar -C "$work" -xzf prowave-linux-x86_64.tar.gz
           pkg="$work/prowave-linux-x86_64"
-          for f in prowave install.sh prowave-studio.desktop prowave.svg prowave-mime.xml README.txt; do
+          for f in prowave install.sh prowave-studio.desktop prowave.png prowave-mime.xml README.txt; do
             test -f "$pkg/$f" || { echo "::error::package is missing $f"; exit 1; }
           done
           test -x "$pkg/prowave" && test -x "$pkg/install.sh"
@@ -58,7 +58,7 @@ jobs:
           HOME="$home" "$pkg/install.sh"
           test -x "$home/.local/bin/prowave"
           test -f "$home/.local/share/applications/prowave-studio.desktop"
-          test -f "$home/.local/share/icons/hicolor/scalable/apps/prowave.svg"
+          test -f "$home/.local/share/icons/hicolor/512x512/apps/prowave.png"
           test -f "$home/.local/share/mime/packages/prowave.xml"
           grep -q 'application/x-prowave' "$home/.local/share/mime/globs2"
           HOME="$home" "$pkg/install.sh" --uninstall
@@ -116,7 +116,7 @@ jobs:
           rm -rf "$root"
           install -D -m 755 target/release/prowave "$root/usr/bin/prowave"
           install -D -m 644 dist/linux/prowave-studio.desktop "$root/usr/share/applications/prowave-studio.desktop"
-          install -D -m 644 dist/linux/prowave.svg "$root/usr/share/icons/hicolor/scalable/apps/prowave.svg"
+          install -D -m 644 dist/linux/prowave.png "$root/usr/share/icons/hicolor/512x512/apps/prowave.png"
           install -D -m 644 dist/linux/prowave-mime.xml "$root/usr/share/mime/packages/prowave.xml"
           install -D -m 644 dist/README-linux.txt "$root/usr/share/doc/prowave-studio/README.txt"
           install -D -m 644 dist/linux/debian-copyright "$root/usr/share/doc/prowave-studio/copyright"
@@ -163,7 +163,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y rpm
           src=$(mktemp -d)
-          cp target/release/prowave dist/linux/prowave-studio.desktop dist/linux/prowave.svg \
+          cp target/release/prowave dist/linux/prowave-studio.desktop dist/linux/prowave.png \
             dist/linux/prowave-mime.xml "$src/"
           cp dist/README-linux.txt "$src/README.txt"
           rpmbuild -bb dist/linux/prowave-studio.spec \
@@ -214,10 +214,10 @@ jobs:
           app=ProWave.AppDir
           install -D -m 755 target/release/prowave "$app/usr/bin/prowave"
           install -D -m 644 dist/linux/prowave-studio.desktop "$app/usr/share/applications/prowave-studio.desktop"
-          install -D -m 644 dist/linux/prowave.svg "$app/usr/share/icons/hicolor/scalable/apps/prowave.svg"
+          install -D -m 644 dist/linux/prowave.png "$app/usr/share/icons/hicolor/512x512/apps/prowave.png"
           install -D -m 644 dist/linux/prowave-mime.xml "$app/usr/share/mime/packages/prowave.xml"
-          install -m 644 dist/linux/prowave-studio.desktop dist/linux/prowave.svg "$app/"
-          ln -s prowave.svg "$app/.DirIcon"
+          install -m 644 dist/linux/prowave-studio.desktop dist/linux/prowave.png "$app/"
+          ln -s prowave.png "$app/.DirIcon"
           ln -s usr/bin/prowave "$app/AppRun"
           curl -fsSL -o appimagetool \
             https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
@@ -290,7 +290,7 @@ jobs:
             'test -x /app/bin/prowave && if ldd /app/bin/prowave | grep "not found"; then exit 1; fi'
           export_dir="$HOME/.local/share/flatpak/exports/share"
           test -f "$export_dir/applications/studio.prowave.Studio.desktop"
-          test -f "$export_dir/icons/hicolor/scalable/apps/studio.prowave.Studio.svg"
+          test -f "$export_dir/icons/hicolor/512x512/apps/studio.prowave.Studio.png"
           flatpak uninstall --user -y --noninteractive studio.prowave.Studio
           if flatpak info studio.prowave.Studio; then exit 1; fi
       - uses: actions/upload-artifact@v4
@@ -317,7 +317,8 @@ jobs:
       - name: Bundle Pro Wave.app
         run: |
           APP="dist/Pro Wave.app"
-          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp dist/macos/prowave.icns "$APP/Contents/Resources/prowave.icns"
           lipo -create -output "$APP/Contents/MacOS/prowave" \
             target/aarch64-apple-darwin/release/prowave \
             target/x86_64-apple-darwin/release/prowave
@@ -331,6 +332,7 @@ jobs:
             <key>CFBundleDisplayName</key><string>Pro Wave</string>
             <key>CFBundleIdentifier</key><string>studio.prowave.app</string>
             <key>CFBundleExecutable</key><string>prowave</string>
+            <key>CFBundleIconFile</key><string>prowave</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>${VERSION}</string>
             <key>CFBundleVersion</key><string>${VERSION}</string>

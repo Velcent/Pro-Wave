@@ -28,7 +28,7 @@ modules:
       # Flatpak requires the desktop file, icon and MIME file to be named after the app id.
       - install -D -m 644 prowave-studio.desktop /app/share/applications/studio.prowave.Studio.desktop
       - sed -i 's/^Icon=.*/Icon=studio.prowave.Studio/' /app/share/applications/studio.prowave.Studio.desktop
-      - install -D -m 644 prowave.svg /app/share/icons/hicolor/scalable/apps/studio.prowave.Studio.svg
+      - install -D -m 644 prowave.png /app/share/icons/hicolor/512x512/apps/studio.prowave.Studio.png
       - install -D -m 644 prowave-mime.xml /app/share/mime/packages/studio.prowave.Studio.xml
     sources:
       - type: file
@@ -36,6 +36,6 @@ modules:
       - type: file
         path: prowave-studio.desktop
       - type: file
-        path: prowave.svg
+        path: prowave.png
       - type: file
         path: prowave-mime.xml
