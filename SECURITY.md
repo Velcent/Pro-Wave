@@ -1,7 +1,7 @@
-# SECURITY.md — ProWave Studio (Logic Pro Clone)
+# SECURITY.md — ProWave 
 
 ## 1. Overview
-`prowave-studio` is a DAW that handles untrusted inputs by design: audio files from internet (wav, aiff, caf, mp3, flac, Apple Loops), MIDI files, third-party plugins (CLAP/VST3/AU), project files (`.prowave`, optional `.logicx` import), IRs for Space Designer, sampler instruments (SFZ, EXS), and user patches. A compromise = code execution with mic access, disk access, network exfiltration.
+`prowave` is a DAW that handles untrusted inputs by design: audio files from internet (wav, aiff, caf, mp3, flac, Apple Loops), MIDI files, third-party plugins (CLAP/VST3/AU), project files (`.prowave`, optional `.logicx` import), IRs for Space Designer, sampler instruments (SFZ, EXS), and user patches. A compromise = code execution with mic access, disk access, network exfiltration.
 
 Our posture: **Rust memory safety is necessary but not sufficient.** We need sandboxing, parsing guards, and supply chain integrity.
 
