@@ -13,7 +13,7 @@ ProWave goal:
 - **macOS support:** CoreAudio + AU + Metal via wgpu, universal binary arm64/x86_64, Hardened Runtime, notarized
 - **Pure Rust:** `#![forbid(unsafe_code)]` except FFI shims, no Objective-C runtime for parsing
 
-## 2. What is a .logicx File? — Reverse Engineered
+## 2. What is a .logicx File?
 
 A `.logicx` is NOT a file. It's a **macOS bundle** — a directory that Finder shows as one file.
 
