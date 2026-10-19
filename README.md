@@ -55,7 +55,7 @@ Get the latest build from the [Releases page](https://github.com/fabox-os/Pro-Wa
 | Any Linux | AppImage, Flatpak bundle, or `prowave-linux-x86_64.tar.gz` with an `install.sh` |
 
 The files are not code signed, so Windows SmartScreen and macOS Gatekeeper warn before running
-them; the release notes say how to continue. Each release also lists a `SHA256SUMS` file.
+them; the release notes say how to continue.
 Linux install steps for every format, the libraries needed and troubleshooting are in
 [`dist/README-linux.txt`](dist/README-linux.txt). The Linux and macOS packages have not been
 tested on real hardware yet; reports are welcome.

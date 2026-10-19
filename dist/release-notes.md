@@ -12,7 +12,7 @@
 | Any Linux (sandboxed) | `prowave-studio-@VERSION@-x86_64.flatpak` | `flatpak install --user ./prowave-studio-@VERSION@-x86_64.flatpak` |
 | Any Linux | `prowave-linux-x86_64.tar.gz` | Unpack, run `./prowave` or `./install.sh` |
 
-Linux packages need glibc 2.31 or newer (Ubuntu 20.04+, Debian 11+, Fedora 32+) and ALSA for sound. Details, required libraries and troubleshooting are in `README.txt` inside the tarball and in [`dist/README-linux.txt`](https://github.com/fabox-os/Pro-Wave/blob/@TAG@/dist/README-linux.txt). `SHA256SUMS` lists the checksum of every file.
+Linux packages need glibc 2.31 or newer (Ubuntu 20.04+, Debian 11+, Fedora 32+) and ALSA for sound. Details, required libraries and troubleshooting are in `README.txt` inside the tarball and in [`dist/README-linux.txt`](https://github.com/fabox-os/Pro-Wave/blob/@TAG@/dist/README-linux.txt).
 
 ## Not signed yet
 

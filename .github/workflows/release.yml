@@ -6,7 +6,7 @@
 # (binary, install.sh, desktop entry, icon, MIME type, README). The linux-* jobs repackage
 # that same binary as .deb, .rpm, AppImage and Flatpak, and test-install each one.
 # Pushing a tag like v0.1.2 builds everything and then the `release` job publishes a public
-# GitHub Release with all the files and their checksums. Running it by hand from the Actions
+# GitHub Release with all the files. Running it by hand from the Actions
 # tab (workflow_dispatch) builds everything but publishes nothing.
 name: Release builds
 
@@ -428,8 +428,6 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           ls -l artifacts
-          (cd artifacts && sha256sum -- * > ../SHA256SUMS) && mv SHA256SUMS artifacts/
-          cat artifacts/SHA256SUMS
           sed "s/@VERSION@/${TAG#v}/g; s/@TAG@/$TAG/g" dist/release-notes.md > notes.md
           # A re-run of the same tag replaces the files instead of failing on the existing Release.
           if gh release view "$TAG" >/dev/null 2>&1; then
