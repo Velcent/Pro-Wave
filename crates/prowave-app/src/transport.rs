@@ -3,7 +3,10 @@
 //!
 //! Every icon is drawn with vector shapes here (no bitmap or font glyphs), so it renders the
 //! same on Windows, Linux and macOS.
-use crate::{model::Project, Bottom, UiState};
+use crate::{
+    model::{Project, SigPart},
+    Bottom, UiState,
+};
 use egui::epaint::text::{LayoutJob, TextFormat};
 use egui::{
     pos2, vec2, Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Sense, Shape, Stroke,
@@ -445,6 +448,18 @@ fn position_job(bbdt: (u32, u32, u32, u32), size: f32, color: Color32) -> Layout
     job
 }
 
+/// Pixels of vertical drag per step when editing the time signature.
+const SIG_PX_PER_STEP: f32 = 10.0;
+
+/// Adds `delta_px` to the drag in progress and takes out the whole steps it now holds, keeping
+/// the remainder for the next frame so slow drags still add up.
+fn take_steps(leftover: &mut f32, delta_px: f32, px_per_step: f32) -> i32 {
+    *leftover += delta_px;
+    let steps = (*leftover / px_per_step).trunc();
+    *leftover -= steps * px_per_step;
+    steps as i32
+}
+
 fn lcd(ui: &Ui, g: &Painter, p: &mut Project, rect: Rect, cpu_load: f32) {
     g.rect_filled(rect, 6.0, LCD_BG);
     g.rect_stroke(
@@ -507,8 +522,37 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, rect: Rect, cpu_load: f32) {
         LCD_TEXT,
     );
 
-    // Column 4: time signature / division.
+    // Column 4: time signature / division. Drag the numerator or the denominator up or down,
+    // like the tempo.
     let sig_x = x0 + 360.0;
+    let half = vec2(24.0, bot - rect.top());
+    for (part, left) in [
+        (SigPart::Numerator, sig_x - 24.0),
+        (SigPart::Denominator, sig_x),
+    ] {
+        let id = egui::Id::unique(("control_bar", "signature", part as u8));
+        let resp = ui
+            .interact(
+                Rect::from_min_size(pos2(left, rect.top()), half),
+                id,
+                Sense::drag(),
+            )
+            .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+            .on_hover_text("Drag to change the time signature");
+        let mut leftover = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
+        if resp.drag_started() {
+            leftover = 0.0;
+        }
+        let steps = if resp.dragged() {
+            take_steps(&mut leftover, -resp.drag_delta().y, SIG_PX_PER_STEP)
+        } else {
+            0
+        };
+        ui.data_mut(|d| d.insert_temp(id, leftover));
+        if steps != 0 {
+            p.step_signature(part, steps);
+        }
+    }
     g.text(
         pos2(sig_x, top),
         Align2::CENTER_TOP,
@@ -851,5 +895,24 @@ pub fn control_bar(
     for (i, draw) in right.iter().enumerate() {
         let c = pos2(bar.right() - 106.0 + i as f32 * 27.5, cy);
         let _ = tbutton(ui, &g, c, &format!("right{i}"), *draw, None, ICON);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slow_drags_add_up_to_whole_steps() {
+        let mut left = 0.0;
+        let total: i32 = (0..25).map(|_| take_steps(&mut left, 1.0, 10.0)).sum();
+        assert_eq!(total, 2);
+        assert!((left - 5.0).abs() < 1e-4);
+
+        // Dragging down gives negative steps, and a reversal cancels what was built up.
+        let mut left = 0.0;
+        assert_eq!(take_steps(&mut left, -25.0, 10.0), -2);
+        assert_eq!(take_steps(&mut left, 25.0, 10.0), 2);
+        assert!(left.abs() < 1e-4);
     }
 }

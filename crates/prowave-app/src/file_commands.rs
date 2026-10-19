@@ -552,4 +552,29 @@ mod tests {
         assert_eq!(opened.tempo, a.project.tempo);
         assert_eq!(opened.name, "Backup");
     }
+
+    #[test]
+    fn an_edited_time_signature_is_saved_and_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut a = app();
+        assert!(a
+            .project
+            .step_signature(crate::model::SigPart::Numerator, 2));
+        assert!(a
+            .project
+            .step_signature(crate::model::SigPart::Denominator, 1));
+        assert_eq!(a.project.sig, (6, 8));
+        assert_ne!(
+            content(&a.project),
+            a.saved,
+            "a new signature is an unsaved change"
+        );
+
+        assert!(a.save_to(&dir.path().join("Waltz")));
+        a.project.sig = (4, 4);
+        a.open(&dir.path().join("Waltz.prowave"), &ctx);
+        assert_eq!(a.project.sig, (6, 8));
+        assert_eq!(a.project.beats_per_bar(), 3.0);
+    }
 }

@@ -335,6 +335,31 @@ impl Project {
         self.sig.0.max(1) as f64 * self.beat_unit()
     }
 
+    /// Moves one half of the time signature by `steps` (up is positive) and returns whether it
+    /// changed. The numerator runs 1-99, the denominator through the powers of two 1-64; both
+    /// stop at their ends. Regions sit on bars, so a change moves them in time: the song
+    /// revision is bumped to have the engine reposition them.
+    pub fn step_signature(&mut self, part: SigPart, steps: i32) -> bool {
+        let before = self.sig;
+        match part {
+            SigPart::Numerator => self.sig.0 = (i32::from(self.sig.0) + steps).clamp(1, 99) as u8,
+            SigPart::Denominator => {
+                let at = SIGNATURE_DENOMINATORS
+                    .iter()
+                    .position(|d| *d == self.sig.1)
+                    .unwrap_or(2);
+                let last = SIGNATURE_DENOMINATORS.len() as i32 - 1;
+                let to = (at as i32 + steps).clamp(0, last) as usize;
+                self.sig.1 = SIGNATURE_DENOMINATORS[to];
+            }
+        }
+        let changed = self.sig != before;
+        if changed {
+            self.song_rev += 1;
+        }
+        changed
+    }
+
     /// Logic-style position for a beat: (bar, beat, division, tick), all 1-based, where
     /// "beat" is the signature's beat (an eighth in 6/8), divisions are 16th notes and there
     /// are 240 ticks per division.
@@ -374,5 +399,64 @@ impl Project {
         let frames = f as u32;
         let sub = (f.fract() * 80.0) as u32;
         format!("{h:02}:{m:02}:{s:02}:{frames:02}.{sub:02}")
+    }
+}
+
+/// The beat lengths a time signature can have (its denominator), as Logic offers them.
+pub const SIGNATURE_DENOMINATORS: [u8; 7] = [1, 2, 4, 8, 16, 32, 64];
+
+/// One half of a time signature.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SigPart {
+    Numerator,
+    Denominator,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signature_parts_step_and_stop_at_their_ends() {
+        let mut p = Project::demo();
+        assert_eq!(p.sig, (4, 4));
+        assert!(p.step_signature(SigPart::Numerator, 2));
+        assert!(p.step_signature(SigPart::Denominator, 1));
+        assert_eq!(p.sig, (6, 8), "the denominator steps through powers of two");
+        assert!(p.step_signature(SigPart::Denominator, 3));
+        assert_eq!(p.sig, (6, 64));
+        assert!(!p.step_signature(SigPart::Denominator, 5), "stops at 64");
+        assert!(p.step_signature(SigPart::Denominator, -9));
+        assert_eq!(p.sig.1, 1, "and at 1");
+        p.step_signature(SigPart::Numerator, 500);
+        assert_eq!(p.sig.0, 99);
+        p.step_signature(SigPart::Numerator, -500);
+        assert_eq!(p.sig.0, 1);
+    }
+
+    #[test]
+    fn a_changed_signature_moves_bars_and_asks_the_engine_to_follow() {
+        let mut p = Project::demo();
+        let rev = p.song_rev;
+        assert_eq!(p.beats_per_bar(), 4.0);
+        assert!(p.step_signature(SigPart::Numerator, -1));
+        assert!(p.step_signature(SigPart::Denominator, 1));
+        assert_eq!(p.sig, (3, 8));
+        assert_eq!(p.beats_per_bar(), 1.5);
+        assert_eq!(p.song_rev, rev + 2);
+
+        // Nothing changes at an end stop, so there is nothing to resend.
+        let mut q = Project::demo();
+        let rev = q.song_rev;
+        assert!(!q.step_signature(SigPart::Numerator, 0));
+        assert_eq!(q.song_rev, rev);
+    }
+
+    #[test]
+    fn an_invalid_denominator_steps_from_quarter_notes() {
+        let mut p = Project::demo();
+        p.sig = (4, 3);
+        assert!(p.step_signature(SigPart::Denominator, 1));
+        assert_eq!(p.sig.1, 8);
     }
 }

@@ -440,6 +440,30 @@ mod tests {
     }
 
     #[test]
+    fn editing_the_signature_repositions_the_notes_sent_to_the_engine() {
+        let mut p = Project::demo();
+        p.tracks.truncate(1);
+        p.tracks[0].regions.truncate(1);
+        p.tracks[0].regions[0].params.mute = false;
+        p.tracks[0].regions[0].start_bar = 3.0;
+        let first = |p: &Project| {
+            song_notes(p)
+                .iter()
+                .map(|n| n.start_beat)
+                .fold(f64::MAX, f64::min)
+        };
+        let (before, rev) = (first(&p), p.song_rev);
+        // 4/4 -> 3/4: bar 3 starts at quarter note 6 instead of 8, so every note moves 2 earlier.
+        assert!(p.step_signature(crate::model::SigPart::Numerator, -1));
+        assert!(
+            (before - first(&p) - 2.0).abs() < 1e-9,
+            "{before} -> {}",
+            first(&p)
+        );
+        assert_ne!(p.song_rev, rev, "the engine is told to rebuild the song");
+    }
+
+    #[test]
     fn bar_display_counts_signature_beats() {
         let mut p = Project::demo();
         // 4.75 quarter notes: bar 2 + 1.75 quarters.
