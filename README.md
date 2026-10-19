@@ -9,6 +9,19 @@ and plays audio through [cpal](https://github.com/RustAudio/cpal): no Electron, 
 > of Logic's instruments are still to come. [`ROADMAP.md`](ROADMAP.md) has the full plan and
 > [`resume.md`](resume.md) a detailed status of what works today.
 
+![ProWave Studio: Tracks area with MIDI and audio regions, the Library, inspector and Mixer](docs/screenshots/tracks-and-mixer.webp)
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/piano-roll.webp" alt="Piano Roll editing the Drummer region, with Time Quantize, Scale Quantize and the velocity lane"></td>
+    <td><img src="docs/screenshots/playback.webp" alt="Playing back: green play button, moving playhead and live meters in the Mixer"></td>
+  </tr>
+  <tr>
+    <td align="center">Piano Roll with quantize and velocity lane</td>
+    <td align="center">Playback with live channel meters</td>
+  </tr>
+</table>
+
 ProWave is an independent project. It is not affiliated with, sponsored by or endorsed by Apple
 Inc. Logic Pro is a trademark of Apple Inc., used here only to describe the workflow ProWave
 follows. ProWave contains no Apple code, artwork or sounds.
