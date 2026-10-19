@@ -1,8 +1,8 @@
-# AGENTS.md — Multi-Agent Development Protocol for ProWave Studio (Logic Pro Clone)
+# AGENTS.md — Multi-Agent Development Protocol for Pro Wave (Logic Pro Clone)
 This file tells AI coding agents (Claude Code, Codex, Cursor, Jolly) how to work in this repo. If you are an AI agent, read this first.
 
 ## 1. Project Intent
-We are building ProWave Studio — a complete functional clone of Apple Logic Pro 11 in pure Rust + WASM. Every Logic Pro feature must be cloned: Drummer, Flex Time/Pitch, Sampler, Quick Sampler, Drum Machine Designer, Alchemy-lite, ES2, Vintage B3/Clav/E-Piano, Sculpture, Retro Synth, Ultrabeat, Studio Strings/Horns, Channel EQ, Compressor (6 models), Space Designer, ChromaVerb, Delay Designer, Pedalboard, Amp Designer, Mastering Assistant, Stem Splitter, Live Loops, Smart Tempo, Score Editor, etc. See roadmap.md Section 1 for exhaustive inventory.
+We are building Pro Wave — a complete functional clone of Apple Logic Pro 11 in pure Rust + WASM. Every Logic Pro feature must be cloned: Drummer, Flex Time/Pitch, Sampler, Quick Sampler, Drum Machine Designer, Alchemy-lite, ES2, Vintage B3/Clav/E-Piano, Sculpture, Retro Synth, Ultrabeat, Studio Strings/Horns, Channel EQ, Compressor (6 models), Space Designer, ChromaVerb, Delay Designer, Pedalboard, Amp Designer, Mastering Assistant, Stem Splitter, Live Loops, Smart Tempo, Score Editor, etc. See roadmap.md Section 1 for exhaustive inventory.
 
 This is NOT a wrapper around JUCE or Electron. Every agent must respect audio-thread constraints.
 
@@ -125,4 +125,4 @@ No secrets. If you need signing cert for macOS, ask human. Never commit `.p12`, 
 If plugin sandbox crashes >3 times on scan, @plugin-agent must quarantine plugin and log to `quarantine.json` - never infinite loop scan. If audio thread xrun >10 times per minute, @qa-agent must open issue.
 
 ---
-> TL;DR for agents: You are building ProWave Studio, a complete Logic Pro clone in Rust + WASM. Audio thread is real-time, no alloc. UI is egui + wgpu. Everything is Rust. If you allocate on audio thread, you break music. Check roadmap.md Section 1 for exact Logic features to clone.
+> TL;DR for agents: You are building Pro Wave, a complete Logic Pro clone in Rust + WASM. Audio thread is real-time, no alloc. UI is egui + wgpu. Everything is Rust. If you allocate on audio thread, you break music. Check roadmap.md Section 1 for exact Logic features to clone.

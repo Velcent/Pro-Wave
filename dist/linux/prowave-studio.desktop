@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=ProWave Studio
+Name=Pro Wave
 Comment=Music production studio
 Exec=prowave %F
 Icon=prowave

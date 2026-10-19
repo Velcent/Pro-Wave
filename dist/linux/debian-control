@@ -3,13 +3,13 @@ Version: @VERSION@
 Architecture: amd64
 Section: sound
 Priority: optional
-Maintainer: ProWave Studio <noreply@prowave.invalid>
+Maintainer: Pro Wave <noreply@prowave.invalid>
 Depends: libc6 (>= 2.31), libasound2 (>= 1.0.16) | libasound2t64
 Recommends: libxkbcommon-x11-0, libwayland-client0, libx11-6, libxcursor1, libxrandr2, libxi6, libegl1, libfontconfig1, libdbus-1-3, xdg-desktop-portal-gtk | xdg-desktop-portal-kde | xdg-desktop-portal-gnome
 Suggests: mesa-vulkan-drivers, zenity, pipewire-alsa
 Homepage: https://prowave.invalid/
 Description: music production studio in the style of Logic Pro
- ProWave Studio is a digital audio workstation written in Rust: tracks,
+ Pro Wave is a digital audio workstation written in Rust: tracks,
  regions, a piano roll, a mixer and a built-in synthesizer, with audio
  through ALSA (PipeWire and PulseAudio via their ALSA plug-ins).
  .

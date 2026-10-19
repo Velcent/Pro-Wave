@@ -1,5 +1,5 @@
 # Release builds for Linux and macOS. macOS can only be built on a Mac (Apple's SDK), so this
-# runs on GitHub's macOS runners: a universal (Apple Silicon + Intel) "ProWave Studio.app",
+# runs on GitHub's macOS runners: a universal (Apple Silicon + Intel) "Pro Wave.app",
 # ad-hoc signed (not notarized).
 # Linux (x86_64, glibc 2.31+): the `linux` job builds the binary once and ships the tarball
 # (binary, install.sh, desktop entry, icon, MIME type, README). The linux-* jobs repackage
@@ -225,11 +225,11 @@ jobs:
           chmod +x appimagetool
           # The runner has no FUSE, so appimagetool runs from its extracted self.
           ARCH=x86_64 VERSION="$VERSION" APPIMAGE_EXTRACT_AND_RUN=1 \
-            ./appimagetool "$app" "ProWave_Studio-${VERSION}-x86_64.AppImage"
-          chmod +x "ProWave_Studio-${VERSION}-x86_64.AppImage"
+            ./appimagetool "$app" "Pro_Wave-${VERSION}-x86_64.AppImage"
+          chmod +x "Pro_Wave-${VERSION}-x86_64.AppImage"
       - name: Check AppImage contents
         run: |
-          img="$PWD/ProWave_Studio-${VERSION}-x86_64.AppImage"
+          img="$PWD/Pro_Wave-${VERSION}-x86_64.AppImage"
           work=$(mktemp -d) && cd "$work"
           "$img" --appimage-extract >/dev/null
           test -x squashfs-root/usr/bin/prowave
@@ -245,7 +245,7 @@ jobs:
             libxcursor1 libxrandr2 libxi6
           status=0
           xvfb-run -a sh -c "APPIMAGE_EXTRACT_AND_RUN=1 WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1 \
-            timeout 15 ./ProWave_Studio-${VERSION}-x86_64.AppImage" || status=$?
+            timeout 15 ./Pro_Wave-${VERSION}-x86_64.AppImage" || status=$?
           if [ "$status" -ne 124 ]; then
             echo "::error::the AppImage exited early with status $status"
             exit 1
@@ -254,7 +254,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: prowave-linux-appimage
-          path: ProWave_Studio-*-x86_64.AppImage
+          path: Pro_Wave-*-x86_64.AppImage
           if-no-files-found: error
 
   linux-flatpak:
@@ -314,9 +314,9 @@ jobs:
         run: |
           cargo build --release -p prowave-app --target aarch64-apple-darwin
           cargo build --release -p prowave-app --target x86_64-apple-darwin
-      - name: Bundle ProWave Studio.app
+      - name: Bundle Pro Wave.app
         run: |
-          APP="dist/ProWave Studio.app"
+          APP="dist/Pro Wave.app"
           mkdir -p "$APP/Contents/MacOS"
           lipo -create -output "$APP/Contents/MacOS/prowave" \
             target/aarch64-apple-darwin/release/prowave \
@@ -327,8 +327,8 @@ jobs:
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-            <key>CFBundleName</key><string>ProWave Studio</string>
-            <key>CFBundleDisplayName</key><string>ProWave Studio</string>
+            <key>CFBundleName</key><string>Pro Wave</string>
+            <key>CFBundleDisplayName</key><string>Pro Wave</string>
             <key>CFBundleIdentifier</key><string>studio.prowave.app</string>
             <key>CFBundleExecutable</key><string>prowave</string>
             <key>CFBundlePackageType</key><string>APPL</string>
@@ -336,7 +336,7 @@ jobs:
             <key>CFBundleVersion</key><string>${VERSION}</string>
             <key>LSMinimumSystemVersion</key><string>11.0</string>
             <key>NSHighResolutionCapable</key><true/>
-            <key>NSMicrophoneUsageDescription</key><string>ProWave Studio records audio from your inputs.</string>
+            <key>NSMicrophoneUsageDescription</key><string>Pro Wave records audio from your inputs.</string>
           </dict>
           </plist>
           EOF

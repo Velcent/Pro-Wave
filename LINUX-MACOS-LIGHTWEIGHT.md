@@ -1,4 +1,4 @@
-# ProWave Studio — Linux & macOS Lightweight Implementation Spec
+# Pro Wave — Linux & macOS Lightweight Implementation Spec
 **Goal: Super leve, Rust puro, funciona em Linux e macOS, 10-20x mais leve que Logic Pro oficial**
 
 ## 1. Por que ProWave é leve

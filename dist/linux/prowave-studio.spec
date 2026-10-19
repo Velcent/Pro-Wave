@@ -31,7 +31,7 @@ Suggests:       mesa-vulkan-drivers
 Suggests:       zenity
 
 %description
-ProWave Studio is a digital audio workstation written in Rust: tracks, regions, a piano
+Pro Wave is a digital audio workstation written in Rust: tracks, regions, a piano
 roll, a mixer and a built-in synthesizer, with audio through ALSA (PipeWire and PulseAudio
 via their ALSA plug-ins). This is an early development build.
 

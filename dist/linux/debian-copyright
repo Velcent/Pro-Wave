@@ -1,8 +1,8 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: ProWave Studio
+Upstream-Name: Pro Wave
 
 Files: *
-Copyright: ProWave Studio contributors
+Copyright: Pro Wave contributors
 License: GPL-3.0-or-later
  This program is free software: you can redistribute it and/or modify it
  under the terms of the GNU General Public License as published by the Free

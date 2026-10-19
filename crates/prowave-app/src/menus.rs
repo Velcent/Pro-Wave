@@ -167,11 +167,7 @@ const WINDOW: &[&str] = &[
     "-",
     "Bring All to Front",
 ];
-const HELP: &[&str] = &[
-    "Quick Help",
-    "Logic-style Key Commands…",
-    "About ProWave Studio",
-];
+const HELP: &[&str] = &["Quick Help", "Logic-style Key Commands…", "About Pro Wave"];
 
 /// View entries Logic greys out while there is nothing to act on.
 const GREYED: &[&str] = &["Create Track Automation", "Convert Automation"];
@@ -396,7 +392,7 @@ pub fn menu_bar(ui: &mut egui::Ui, p: &mut Project, s: &mut crate::UiState) {
         .config(egui::containers::menu::MenuConfig::new().style(menu_style(light)));
     bar.ui(ui, |ui| {
         ui.label(
-            egui::RichText::new("ProWave Studio")
+            egui::RichText::new("Pro Wave")
                 .strong()
                 .color(look(light).bar_text),
         );

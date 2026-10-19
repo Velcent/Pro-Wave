@@ -2,7 +2,7 @@
 name = "prowave-project"
 version = "0.1.0"
 edition = "2021"
-description = "ProWave Studio project file (.prowave): zip with project.json and media/"
+description = "Pro Wave project file (.prowave): zip with project.json and media/"
 license = "GPL-3.0-or-later"
 
 [dependencies]

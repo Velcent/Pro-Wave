@@ -1,12 +1,12 @@
 #!/bin/sh
-# Installs ProWave Studio for the current user (no root needed). Undo with: ./install.sh --uninstall
+# Installs Pro Wave for the current user (no root needed). Undo with: ./install.sh --uninstall
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 bin="$HOME/.local/bin"; apps="$HOME/.local/share/applications"
 icons="$HOME/.local/share/icons/hicolor/scalable/apps"; mime="$HOME/.local/share/mime"
 if [ "$1" = "--uninstall" ]; then
   rm -f "$bin/prowave" "$apps/prowave-studio.desktop" "$icons/prowave.svg" "$mime/packages/prowave.xml"
-  echo "ProWave Studio removed."
+  echo "Pro Wave removed."
 else
   mkdir -p "$bin" "$apps" "$icons" "$mime/packages"
   install -m 755 "$here/prowave" "$bin/prowave"

@@ -1,7 +1,7 @@
-ProWave Studio — Linux x86_64 build
-====================================
+Pro Wave — Linux x86_64 build
+=============================
 
-ProWave Studio is a DAW (music production app) in the style of Apple Logic Pro, written in
+Pro Wave is a DAW (music production app) in the style of Apple Logic Pro, written in
 Rust. This is an early development build: expect missing features and rough edges.
 
 NOTE: this build has not been tested on a real Linux machine yet (it was compiled either
@@ -84,7 +84,7 @@ The easy way (no root needed): from the unpacked folder run
 
   ./install.sh
 
-It copies the program to ~/.local/bin, adds ProWave Studio to your app menu with an icon, and
+It copies the program to ~/.local/bin, adds Pro Wave to your app menu with an icon, and
 makes double-clicking a .prowave file open it. Undo it with:  ./install.sh --uninstall
 If your terminal can't find "prowave" afterwards, add ~/.local/bin to your PATH.
 
@@ -102,8 +102,8 @@ Other package formats (same program, from the same release page):
     remove with:  sudo dnf remove prowave-studio
 
   AppImage (any distribution, nothing to install):
-    chmod +x ProWave_Studio-<version>-x86_64.AppImage
-    ./ProWave_Studio-<version>-x86_64.AppImage
+    chmod +x Pro_Wave-<version>-x86_64.AppImage
+    ./Pro_Wave-<version>-x86_64.AppImage
     If it says FUSE is missing, install libfuse2 (Ubuntu 24.04+: libfuse2t64) or run it with
     APPIMAGE_EXTRACT_AND_RUN=1. It uses the system's audio and graphics libraries (section 2).
 

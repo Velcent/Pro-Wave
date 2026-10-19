@@ -1,6 +1,6 @@
-# ProWave Studio — Complete Logic Pro Clone Roadmap
+# Pro Wave — Complete Logic Pro Clone Roadmap
 **Codename: `prowave-studio` | Stack: Pure Rust + WebAssembly | Targets: macOS, Linux, Windows, Web**
-> ProWave Studio is an independent, clean-room DAW inspired by Apple Logic Pro. Logic Pro is a trademark of Apple Inc. No Apple code, assets, samples, or UI assets are reused. This document is a functional specification for re-implementation.
+> Pro Wave is an independent, clean-room DAW inspired by Apple Logic Pro. Logic Pro is a trademark of Apple Inc. No Apple code, assets, samples, or UI assets are reused. This document is a functional specification for re-implementation.
 
 ## 0. Goal
 

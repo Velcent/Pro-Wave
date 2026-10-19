@@ -58,7 +58,7 @@ pub fn content(p: &Project) -> ProjectDoc {
 }
 
 fn dialog() -> FileDialog {
-    FileDialog::new().add_filter("ProWave Project", &[prowave_project::EXTENSION])
+    FileDialog::new().add_filter("Pro Wave Project", &[prowave_project::EXTENSION])
 }
 
 /// The answer to the "save changes?" prompt.
@@ -107,7 +107,7 @@ impl App {
         let mut answer = None;
         let modal = egui::Modal::new(egui::Id::unique(("file", "save_prompt"))).show(ctx, |ui| {
             ui.set_width(380.0);
-            ui.heading("ProWave Studio");
+            ui.heading("Pro Wave");
             ui.add_space(6.0);
             ui.label(format!(
                 "Do you want to save the changes made to the project \"{}\"?",
@@ -210,7 +210,7 @@ impl App {
 
     /// Keeps the window title in step with the project name.
     pub fn update_title(&mut self, ctx: &egui::Context) {
-        let title = format!("ProWave Studio — {} - Tracks", self.project.name);
+        let title = format!("Pro Wave — {} - Tracks", self.project.name);
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title = title;
@@ -276,7 +276,7 @@ mod tests {
         assert_ne!(a.project.song_rev, rev, "engine must rebuild the song");
         assert_eq!(content(&a.project), a.saved);
         a.update_title(&ctx);
-        assert_eq!(a.title, "ProWave Studio — Night Drive - Tracks");
+        assert_eq!(a.title, "Pro Wave — Night Drive - Tracks");
     }
 
     #[test]

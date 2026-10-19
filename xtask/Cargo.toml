@@ -3,5 +3,5 @@ name = "xtask"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "ProWave Studio developer tasks: `cargo xtask check`, `wasm-check`, `rt-check`"
+description = "Pro Wave developer tasks: `cargo xtask check`, `wasm-check`, `rt-check`"
 license = "GPL-3.0-or-later"

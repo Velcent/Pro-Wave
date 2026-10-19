@@ -1,8 +1,8 @@
-# ProWave Studio — Status Summary
+# Pro Wave — Status Summary
 
 _Last updated: 2026-10-19_
 
-ProWave Studio is a pure-Rust (egui + cpal) DAW whose look and workflow follow Apple Logic Pro.
+Pro Wave is a pure-Rust (egui + cpal) DAW whose look and workflow follow Apple Logic Pro.
 It runs on Windows and is written to be portable to macOS and Linux. Everything is drawn from
 scratch (vector shapes, own patch names); no Apple artwork or code is copied.
 
@@ -34,7 +34,7 @@ cargo run -p prowave-engine --example beep          # latency test
 |---|---|
 | **Windows** x86_64 | ✅ `cargo build --release -p prowave-app` (tested daily) |
 | **Linux** x86_64 | ✅ Built on 2026-10-19: `dist/prowave-linux-x86_64.tar.gz` (glibc 2.31+: Ubuntu 20.04+, Debian 11+). **Compiled, but not yet run on a Linux machine** |
-| **macOS** (Apple Silicon + Intel) | ❌ **Cannot be built on this Windows PC.** Building for macOS needs Apple's SDK (AppKit, CoreAudio, Metal), which only comes with Xcode on a Mac. Options: build on a Mac (`cargo build --release -p prowave-app`), or push the project to GitHub and run `.github/workflows/release.yml`, which builds a universal `ProWave Studio.app` on GitHub's macOS runners |
+| **macOS** (Apple Silicon + Intel) | ❌ **Cannot be built on this Windows PC.** Building for macOS needs Apple's SDK (AppKit, CoreAudio, Metal), which only comes with Xcode on a Mac. Options: build on a Mac (`cargo build --release -p prowave-app`), or push the project to GitHub and run `.github/workflows/release.yml`, which builds a universal `Pro Wave.app` on GitHub's macOS runners |
 
 How the Linux build was made from Windows (cross-compiling, no WSL/Docker needed):
 - Tools: Zig (`pip install ziglang`) + `cargo install cargo-zigbuild`.
@@ -141,7 +141,7 @@ How the Linux build was made from Windows (cross-compiling, no WSL/Docker needed
   (licences/advisories), wasm32 build. Passes.
 - GitHub Actions CI file for Windows / macOS / Linux / wasm (`.github/workflows/ci.yml`).
 - Release workflow (`.github/workflows/release.yml`): Linux tarball and a universal macOS
-  `ProWave Studio.app` (ad-hoc signed, not notarized). Never run yet (needs a GitHub repo).
+  `Pro Wave.app` (ad-hoc signed, not notarized). Never run yet (needs a GitHub repo).
 - `beep` example measures output latency.
 
 ---

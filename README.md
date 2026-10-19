@@ -9,7 +9,7 @@ and plays audio through [cpal](https://github.com/RustAudio/cpal): no Electron, 
 > of Logic's instruments are still to come. [`ROADMAP.md`](ROADMAP.md) has the full plan and
 > [`resume.md`](resume.md) a detailed status of what works today.
 
-![ProWave Studio: Tracks area with MIDI and audio regions, the Library, inspector and Mixer](docs/screenshots/tracks-and-mixer.webp)
+![Pro Wave: Tracks area with MIDI and audio regions, the Library, inspector and Mixer](docs/screenshots/tracks-and-mixer.webp)
 
 <table>
   <tr>
@@ -49,7 +49,7 @@ or run by hand from the Actions tab. Each run produces:
 | System | Files |
 |---|---|
 | Linux x86_64 (glibc 2.31+) | `.tar.gz` with an `install.sh`, `.deb` (Debian/Ubuntu), `.rpm` (Fedora/openSUSE), AppImage, Flatpak bundle |
-| macOS (Apple Silicon + Intel) | `ProWave Studio.app` (ad-hoc signed, not notarized) |
+| macOS (Apple Silicon + Intel) | `Pro Wave.app` (ad-hoc signed, not notarized) |
 | Windows x64 | build from source (below) |
 
 Download them from the run's **Artifacts** section. Linux install steps for every format, the

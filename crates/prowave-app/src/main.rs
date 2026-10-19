@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-//! ProWave Studio desktop app. Pure Rust (egui/eframe) for Windows, Linux and macOS.
+//! Pro Wave desktop app. Pure Rust (egui/eframe) for Windows, Linux and macOS.
 // Debug builds abort if the audio callback allocates (see `prowave-engine` output.rs).
 #[cfg(debug_assertions)]
 #[global_allocator]
@@ -251,7 +251,7 @@ fn init_logging() {
 fn main() -> eframe::Result {
     // Release builds: on a crash, write a report to the temp folder instead of a raw panic.
     human_panic::setup_panic!(human_panic::Metadata::new(
-        "ProWave Studio",
+        "Pro Wave",
         env!("CARGO_PKG_VERSION")
     ));
     init_logging();
@@ -259,13 +259,13 @@ fn main() -> eframe::Result {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1600.0, 980.0])
-            .with_title("ProWave Studio — Untitled - Tracks")
+            .with_title("Pro Wave — Untitled - Tracks")
             // Window class: lets Linux desktops match the window to its .desktop entry and icon.
             .with_app_id("prowave"),
         ..Default::default()
     };
     let result = eframe::run_native(
-        "ProWave Studio",
+        "Pro Wave",
         opts,
         Box::new(|cc| {
             theme::apply(&cc.egui_ctx);

@@ -1,4 +1,4 @@
-# ProWave Studio — Official Logic Pro .logicx Support Spec
+# Pro Wave — Official Logic Pro .logicx Support Spec
 **Target: Claude must implement this 100% in pure Rust | File: `crates/prowave-logicx-import`**
 > This spec allows ProWave to OPEN and SAVE official Apple Logic Pro .logicx projects on Linux and macOS, while being 10-20x lighter than Logic Pro.
 
