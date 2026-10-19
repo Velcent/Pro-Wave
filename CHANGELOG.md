@@ -11,6 +11,7 @@ being released into the GitHub Release notes, so keep one `## <version>` heading
   song; every later start begins with a clean project (one empty instrument track).
 - **Project Chooser.** *File > New from Template…* opens a chooser with New Project, your Recent
   projects and Project Templates: Empty Project, Songwriter, Electronic, Podcast and Demo Song.
+- **Window title** is now just "Pro Wave", without the project name and "Tracks".
 - **Fixed:** the waveforms of audio tracks without a recording (Electric Bass and Lead Vocal in
   the demo) stayed still while the Tracks area scrolled or zoomed. They now move with their
   regions.

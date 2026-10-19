@@ -1,6 +1,5 @@
 //! File > New… / Open… / Open Recent / Save / Save As… / Save A Copy As… / Revert to Saved:
-//! native dialogs (rfd), key commands, the "save changes?" and "revert?" prompts and the window
-//! title ("<project> - Tracks", as in Logic).
+//! native dialogs (rfd), key commands and the "save changes?" and "revert?" prompts.
 use crate::model::Project;
 use crate::start_screen::Template;
 use crate::{project_io, App};
@@ -335,19 +334,6 @@ impl App {
         // A project is open now, so the Project Chooser has done its job.
         self.ui.chooser = None;
     }
-
-    /// Keeps the window title in step with the project name.
-    pub fn update_title(&mut self, ctx: &egui::Context) {
-        let title = if self.ui.chooser.is_some() {
-            "Pro Wave — Project Chooser".to_string()
-        } else {
-            format!("Pro Wave — {} - Tracks", self.project.name)
-        };
-        if title != self.title {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
-            self.title = title;
-        }
-    }
 }
 
 #[cfg(test)]
@@ -363,7 +349,6 @@ mod tests {
             ui: crate::UiState::new(),
             sync: None,
             path: None,
-            title: String::new(),
             native_menu: None,
         }
     }
@@ -414,8 +399,6 @@ mod tests {
         assert_eq!(a.project.tempo, 97.0);
         assert_ne!(a.project.song_rev, rev, "engine must rebuild the song");
         assert_eq!(content(&a.project), a.saved);
-        a.update_title(&ctx);
-        assert_eq!(a.title, "Pro Wave — Night Drive - Tracks");
     }
 
     #[test]

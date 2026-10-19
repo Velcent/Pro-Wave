@@ -115,8 +115,6 @@ struct App {
     path: Option<std::path::PathBuf>,
     /// Content at the last open/save, to detect unsaved changes (see `file_commands`).
     saved: prowave_project::ProjectDoc,
-    /// Window title last sent to the viewport.
-    title: String,
     /// macOS: the menus in the system menu bar (elsewhere they are drawn in the window).
     native_menu: Option<native_menu::NativeMenu>,
 }
@@ -168,7 +166,6 @@ impl App {
             self.run_file_cmd(cmd, ctx);
         }
         self.show_save_prompt(ctx);
-        self.update_title(ctx);
     }
 }
 
@@ -296,7 +293,6 @@ impl eframe::App for App {
         }
         self.show_save_prompt(&ctx);
         self.show_revert_prompt(&ctx);
-        self.update_title(&ctx);
     }
 }
 
@@ -336,7 +332,8 @@ fn main() -> eframe::Result {
     project_io::remove_stale_media(std::time::Duration::from_secs(7 * 24 * 3600));
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1600.0, 980.0])
-        .with_title("Pro Wave — Untitled - Tracks")
+        // Just the app name, on every system: no project name or view in the title bar.
+        .with_title("Pro Wave")
         // Window class: lets Linux desktops match the window to its .desktop entry and icon.
         .with_app_id("prowave");
     // Title bar / taskbar icon. A broken icon must not stop the app from starting.
@@ -381,7 +378,6 @@ fn main() -> eframe::Result {
                 ui: UiState::new(),
                 sync,
                 path: None,
-                title: String::new(),
                 native_menu: None,
             };
             #[cfg(target_os = "macos")]
