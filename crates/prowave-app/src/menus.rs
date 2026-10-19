@@ -51,6 +51,7 @@ const TRACK: &[&str] = &[
     "Delete Track",
     "-",
     "Create Track Stack…",
+    "Release Track Stack",
     "Show Master Track",
     "Show Tempo Track",
     "Show Chord Track",
@@ -248,6 +249,12 @@ fn checked(label: &str, s: &crate::UiState) -> bool {
     }
 }
 
+/// Track numbers shifted, so a remembered region or note selection may point at another track.
+fn forget_region_selection(s: &mut crate::UiState) {
+    s.tracks.selected = None;
+    s.piano.selected.clear();
+}
+
 /// Runs a menu entry (File entries are queued in `UiState::file_cmd` for `App`).
 fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
     match label {
@@ -266,6 +273,15 @@ fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
         }
         "New Aux Track" => {
             p.add_track(TrackKind::Aux);
+        }
+        "Create Track Stack…" => {
+            p.create_track_stack(p.selected_track);
+            forget_region_selection(s);
+        }
+        "Release Track Stack" => {
+            if p.release_track_stack(p.selected_track) {
+                forget_region_selection(s);
+            }
         }
         "Go to Beginning" => p.position_beats = 0.0,
         "Record" => p.recording = !p.recording,
@@ -523,6 +539,31 @@ mod tests {
         assert_eq!(p.tracks.len(), n + 1);
         assert_eq!(p.tracks[n].kind, TrackKind::Aux);
         assert_eq!(p.selected_track, n);
+    }
+
+    #[test]
+    fn track_stack_entries_group_and_release_the_selected_track() {
+        let (mut p, mut s) = (Project::demo(), crate::UiState::new());
+        assert!(TRACK.contains(&"Create Track Stack…") && TRACK.contains(&"Release Track Stack"));
+        p.selected_track = 2;
+        s.tracks.selected = Some((2, 0));
+        let n = p.tracks.len();
+        apply("Create Track Stack…", &mut p, &mut s);
+        assert_eq!(p.tracks.len(), n + 1);
+        assert_eq!(
+            (p.tracks[2].kind, p.tracks[3].indent),
+            (TrackKind::Folder, 1)
+        );
+        assert_eq!(
+            s.tracks.selected, None,
+            "indexes moved, so the selection is dropped"
+        );
+        apply("Release Track Stack", &mut p, &mut s);
+        assert_eq!(p.tracks.len(), n);
+        assert!(p
+            .tracks
+            .iter()
+            .all(|t| t.indent == 0 && t.kind != TrackKind::Folder));
     }
 
     #[test]

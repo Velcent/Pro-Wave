@@ -424,6 +424,87 @@ impl Project {
         format!("{label} {nth}")
     }
 
+    /// Index just past the last track inside folder `i` (a track with a higher nesting level
+    /// than the folder, directly after it). For a track that is not a folder this is `i + 1`.
+    pub fn folder_end(&self, i: usize) -> usize {
+        let level = self.tracks[i].indent;
+        let mut end = i + 1;
+        while end < self.tracks.len() && self.tracks[end].indent > level {
+            end += 1;
+        }
+        end
+    }
+
+    /// Whether track `i` is hidden because a folder around it is folded.
+    pub fn hidden_by_fold(&self, i: usize) -> bool {
+        let mut level = self.tracks[i].indent;
+        for j in (0..i).rev() {
+            let t = &self.tracks[j];
+            if t.indent < level {
+                if t.kind == TrackKind::Folder && t.folded {
+                    return true;
+                }
+                level = t.indent;
+            }
+        }
+        false
+    }
+
+    /// Track > Create Track Stack: puts track `i` (with everything inside it, if it is a
+    /// folder) into a new folder at its place, selects the folder and returns its index.
+    /// Tracks after it move down one slot, so the engine is told the song changed.
+    pub fn create_track_stack(&mut self, i: usize) -> usize {
+        let (end, level) = (self.folder_end(i), self.tracks[i].indent);
+        for t in &mut self.tracks[i..end] {
+            t.indent = t.indent.saturating_add(1);
+        }
+        let n = self
+            .tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Folder)
+            .count()
+            + 1;
+        let mut folder = Track::new(format!("Folder {n}"), TrackKind::Folder);
+        folder.indent = level;
+        self.tracks.insert(i, folder);
+        self.selected_track = i;
+        self.song_rev += 1;
+        i
+    }
+
+    /// Track > Release Track Stack: removes folder `i` and lifts the tracks inside it one
+    /// level. Returns false (and changes nothing) when `i` is not a folder.
+    pub fn release_track_stack(&mut self, i: usize) -> bool {
+        if self
+            .tracks
+            .get(i)
+            .is_none_or(|t| t.kind != TrackKind::Folder)
+        {
+            return false;
+        }
+        let end = self.folder_end(i);
+        for t in &mut self.tracks[i + 1..end] {
+            t.indent = t.indent.saturating_sub(1);
+        }
+        self.tracks.remove(i);
+        if self.selected_track > i {
+            self.selected_track -= 1;
+        }
+        self.selected_track = self.selected_track.min(self.tracks.len().saturating_sub(1));
+        self.song_rev += 1;
+        true
+    }
+
+    /// Sets Mute and/or Solo on folder `i` and on every track inside it, as a folder's M and S
+    /// buttons do.
+    pub fn set_folder_flags(&mut self, i: usize, mute: Option<bool>, solo: Option<bool>) {
+        let end = self.folder_end(i);
+        for t in &mut self.tracks[i..end] {
+            t.mute = mute.unwrap_or(t.mute);
+            t.solo = solo.unwrap_or(t.solo);
+        }
+    }
+
     /// Repairs folder nesting: a track can sit at most one level below the track before it,
     /// and only when that one is a `Folder`. Run after loading a file that may be hand-edited.
     pub fn normalize_nesting(&mut self) {
@@ -622,6 +703,100 @@ mod tests {
         assert_eq!(p.channel_name(a2), "Aux 2");
         assert_eq!(p.channel_name(audio), "Audio 1");
         assert_eq!(p.channel_name(0), "Inst 1");
+    }
+
+    /// Tracks "a b c d e": b and c in a folder (a), d outside, e in a nested folder inside d.
+    fn stack_fixture() -> Project {
+        let mut p = Project::demo();
+        let k = |name: &str, kind, indent| {
+            let mut t = Track::new(name, kind);
+            t.indent = indent;
+            t
+        };
+        let (inst, folder) = (TrackKind::Instrument, TrackKind::Folder);
+        p.tracks = vec![
+            k("F", folder, 0),
+            k("b", inst, 1),
+            k("c", inst, 1),
+            k("d", inst, 0),
+            k("G", folder, 0),
+            k("e", inst, 1),
+        ];
+        p
+    }
+
+    #[test]
+    fn folders_own_the_deeper_tracks_after_them() {
+        let p = stack_fixture();
+        assert_eq!(p.folder_end(0), 3);
+        assert_eq!(p.folder_end(4), 6);
+        assert_eq!(p.folder_end(3), 4, "a plain track is its own range");
+    }
+
+    #[test]
+    fn folding_hides_exactly_the_tracks_inside() {
+        let mut p = stack_fixture();
+        let hidden = |p: &Project| {
+            (0..p.tracks.len())
+                .filter(|i| p.hidden_by_fold(*i))
+                .collect::<Vec<_>>()
+        };
+        assert!(hidden(&p).is_empty());
+        p.tracks[0].folded = true;
+        assert_eq!(hidden(&p), [1, 2], "the folder itself and the others stay");
+        p.tracks[4].folded = true;
+        assert_eq!(hidden(&p), [1, 2, 5]);
+        // A folded outer folder hides an open inner one's tracks as well.
+        let mut p = stack_fixture();
+        p.tracks[0].folded = false;
+        p.create_track_stack(0);
+        p.tracks[0].folded = true;
+        assert_eq!((1..4).filter(|i| p.hidden_by_fold(*i)).count(), 3);
+    }
+
+    #[test]
+    fn a_track_stack_wraps_the_track_and_can_be_released_again() {
+        let mut p = stack_fixture();
+        let (rev, names) = (p.song_rev, |p: &Project| {
+            p.tracks
+                .iter()
+                .map(|t| (t.name.clone(), t.indent))
+                .collect::<Vec<_>>()
+        });
+        let before = names(&p);
+
+        // Wrap the plain track "d" (index 3).
+        let at = p.create_track_stack(3);
+        assert_eq!(
+            (at, p.selected_track, p.tracks[3].kind),
+            (3, 3, TrackKind::Folder)
+        );
+        assert_eq!(p.tracks[3].name, "Folder 3");
+        assert_eq!((p.tracks[4].name.as_str(), p.tracks[4].indent), ("d", 1));
+        assert_ne!(p.song_rev, rev);
+
+        assert!(p.release_track_stack(3));
+        assert_eq!(names(&p), before, "release undoes create");
+        assert!(!p.release_track_stack(3), "d is not a folder");
+
+        // Wrapping a folder takes everything inside it one level deeper.
+        p.create_track_stack(0);
+        let nested: Vec<u8> = p.tracks[..4].iter().map(|t| t.indent).collect();
+        assert_eq!(nested, [0, 1, 2, 2]);
+        assert_eq!(p.folder_end(0), 4);
+    }
+
+    #[test]
+    fn a_folders_mute_and_solo_reach_every_track_inside_it() {
+        let mut p = stack_fixture();
+        p.set_folder_flags(0, Some(true), None);
+        let muted: Vec<bool> = p.tracks.iter().map(|t| t.mute).collect();
+        assert_eq!(muted, [true, true, true, false, false, false]);
+        p.set_folder_flags(0, None, Some(true));
+        assert!(p.tracks[..3].iter().all(|t| t.solo && t.mute));
+        assert!(!p.tracks[3].solo, "tracks outside the folder are untouched");
+        p.set_folder_flags(0, Some(false), Some(false));
+        assert!(p.tracks.iter().all(|t| !t.mute && !t.solo));
     }
 
     #[test]

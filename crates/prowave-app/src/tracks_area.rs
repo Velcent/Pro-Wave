@@ -18,6 +18,8 @@ const TOOLBAR_H: f32 = 30.0;
 const RULER_H: f32 = 26.0;
 const HEADER_W: f32 = 340.0;
 const NUM_W: f32 = 24.0;
+/// How far each folder nesting level moves a track header's contents to the right.
+const INDENT_W: f32 = 14.0;
 
 const TOOLBAR_BG: Color32 = Color32::from_rgb(0x3c, 0x3c, 0x3c);
 const HEADER_BG: Color32 = Color32::from_rgb(0x41, 0x41, 0x41);
@@ -160,8 +162,14 @@ fn row_layout(p: &Project, row_h: f32) -> Vec<(f32, f32)> {
     let mut top = 0.0;
     p.tracks
         .iter()
-        .map(|t| {
-            let h = (row_h * t.height).round().max(1.0);
+        .enumerate()
+        .map(|(i, t)| {
+            // The tracks of a folded folder take no room (every loop below skips them).
+            let h = if p.hidden_by_fold(i) {
+                0.0
+            } else {
+                (row_h * t.height).round().max(1.0)
+            };
             let row = (top, h);
             top += h;
             row
@@ -831,6 +839,54 @@ fn draw_peaks(g: &Painter, body: Rect, x0: f32, full_w: f32, peaks: &[(f32, f32)
     }
 }
 
+/// Triangle pointing down (open) or right (folded), drawn as a shape so it needs no font glyph.
+fn disclosure_triangle(g: &Painter, c: Pos2, open: bool, col: Color32) {
+    let pts = if open {
+        vec![
+            c + vec2(-4.0, -2.5),
+            c + vec2(4.0, -2.5),
+            c + vec2(0.0, 3.5),
+        ]
+    } else {
+        vec![
+            c + vec2(-2.5, -4.0),
+            c + vec2(-2.5, 4.0),
+            c + vec2(3.5, 0.0),
+        ]
+    };
+    g.add(Shape::convex_polygon(pts, col, Stroke::NONE));
+}
+
+/// A folder's M and S buttons: they set the same state on every track inside the folder.
+fn folder_buttons(ui: &Ui, g: &Painter, p: &mut Project, i: usize, x: f32, y: f32, selected: bool) {
+    let size = vec2(18.0, 15.0);
+    let (mute, solo) = (p.tracks[i].mute, p.tracks[i].solo);
+    if header_button(
+        ui,
+        g,
+        Rect::from_min_size(pos2(x, y), size),
+        (i, "m"),
+        "M",
+        mute,
+        MUTE_ON,
+        selected,
+    ) {
+        p.set_folder_flags(i, Some(!mute), None);
+    }
+    if header_button(
+        ui,
+        g,
+        Rect::from_min_size(pos2(x + 21.0, y), size),
+        (i, "s"),
+        "S",
+        solo,
+        SOLO_ON,
+        selected,
+    ) {
+        p.set_folder_flags(i, None, Some(!solo));
+    }
+}
+
 fn header(ui: &Ui, g: &Painter, p: &mut Project, i: usize, hdr: Rect) {
     let selected = p.selected_track == i;
     g.rect_filled(hdr, 0.0, if selected { HEADER_SEL } else { HEADER_BG });
@@ -852,8 +908,25 @@ fn header(ui: &Ui, g: &Painter, p: &mut Project, i: usize, hdr: Rect) {
 
     let h = hdr.height();
     let icon_size = (h - 14.0).clamp(22.0, 40.0);
+    let indent = f32::from(p.tracks[i].indent) * INDENT_W;
+    let folder = p.tracks[i].kind == TrackKind::Folder;
+    let content_x = hdr.left() + NUM_W + 6.0 + indent;
+    if folder {
+        // Fold arrow: click to hide or show the tracks inside.
+        let arrow = Rect::from_center_size(pos2(content_x + 5.0, hdr.center().y), vec2(14.0, 20.0));
+        if ui
+            .interact(arrow, id(("fold", i)), Sense::click())
+            .clicked()
+        {
+            p.tracks[i].folded = !p.tracks[i].folded;
+        }
+        disclosure_triangle(g, arrow.center(), !p.tracks[i].folded, TEXT_DIM);
+    }
     let icon = Rect::from_min_size(
-        pos2(hdr.left() + NUM_W + 6.0, hdr.center().y - icon_size / 2.0),
+        pos2(
+            content_x + if folder { 14.0 } else { 0.0 },
+            hdr.center().y - icon_size / 2.0,
+        ),
         vec2(icon_size, icon_size),
     );
     draw_icon(g, icon, track_icon(&p.tracks[i]));
@@ -876,6 +949,14 @@ fn header(ui: &Ui, g: &Painter, p: &mut Project, i: usize, hdr: Rect) {
         name_galley,
         TEXT,
     );
+
+    // A folder only has M and S, which act on everything inside it, and no volume or pan.
+    if folder {
+        if !compact {
+            folder_buttons(ui, g, p, i, name_x, hdr.center().y + 3.0, selected);
+        }
+        return;
+    }
 
     // M S R (I) buttons under the name (compact tracks: hidden, like Logic at small heights).
     let audio = p.tracks[i].kind == TrackKind::Audio;
@@ -1047,10 +1128,16 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let first_bar = (scroll_x / v.bar_w).floor() as i64;
     let last_bar = ((scroll_x + lanes.width()) / v.bar_w).ceil() as i64;
     for (i, &(top, row_h)) in rows.iter().enumerate() {
+        if row_h <= 0.0 {
+            continue;
+        }
         let y = lanes.top() + top - scroll_y;
         let row = Rect::from_min_size(pos2(lanes.left(), y), vec2(lanes.width(), row_h));
         if p.selected_track == i {
             g.rect_filled(row, 0.0, LANE_SEL);
+        }
+        if p.tracks[i].kind == TrackKind::Folder {
+            g.rect_filled(row, 0.0, Color32::from_white_alpha(10));
         }
         g.line_segment(
             [row.left_bottom(), row.right_bottom()],
@@ -1089,6 +1176,9 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let step = snap_step(v.snap, beat_px, bpb, unit);
     let mut moved = false;
     for (ti, &(top, row_h)) in rows.iter().enumerate() {
+        if row_h <= 0.0 {
+            continue;
+        }
         let y = lanes.top() + top - scroll_y;
         if y + row_h < lanes.top() || y > lanes.bottom() {
             continue;
@@ -1165,6 +1255,9 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let gh = ui.painter_at(headers);
     gh.rect_filled(headers, 0.0, Color32::from_gray(0x3a));
     for (i, &(top, row_h)) in rows.iter().enumerate() {
+        if row_h <= 0.0 {
+            continue;
+        }
         let y = headers.top() + top - scroll_y;
         if y + row_h < headers.top() || y > headers.bottom() {
             continue;
@@ -1177,6 +1270,9 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     // Logic. Registered after headers and regions so the edge wins over them.
     let edges = Rect::from_min_max(pos2(headers.left(), lanes.top()), lanes.right_bottom());
     for (i, &(top, row_h)) in rows.iter().enumerate() {
+        if row_h <= 0.0 {
+            continue;
+        }
         let bottom = lanes.top() + top + row_h - scroll_y;
         if bottom < edges.top() || bottom > edges.bottom() {
             continue;
@@ -1443,6 +1539,28 @@ mod row_tests {
         assert_eq!(row_at(&rows, 168.0), Some(2));
         assert_eq!(row_at(&rows, 196.0), None);
         assert_eq!(row_at(&rows, -1.0), None);
+    }
+
+    #[test]
+    fn the_tracks_of_a_folded_folder_take_no_room() {
+        let mut p = Project::demo();
+        p.tracks.truncate(4);
+        let folder = p.create_track_stack(1); // wraps track 1: [t0, F, t1, t2, t3]
+        assert_eq!(folder, 1);
+        let open = row_layout(&p, 56.0);
+        assert_eq!(open.len(), 5);
+        assert!(open.iter().all(|&(_, h)| h == 56.0));
+
+        p.tracks[1].folded = true;
+        let folded = row_layout(&p, 56.0);
+        assert_eq!(folded[2].1, 0.0, "the wrapped track is hidden");
+        assert_eq!(
+            folded[3],
+            (112.0, 56.0),
+            "the next track moves up under the folder"
+        );
+        assert_eq!(row_at(&folded, 100.0), Some(1));
+        assert_eq!(row_at(&folded, 112.0), Some(3), "hidden rows are never hit");
     }
 
     #[test]
