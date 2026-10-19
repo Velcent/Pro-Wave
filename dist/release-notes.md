@@ -1,5 +1,7 @@
 **Pro Wave @VERSION@** is an early development build of a Logic Pro-style music production app (DAW) written in Rust: tracks, MIDI and audio regions, Piano Roll, Mixer, Library and a built-in synthesizer. Expect missing features and rough edges.
 
+@CHANGES@
+
 ## Downloads
 
 | System | File | How to install |

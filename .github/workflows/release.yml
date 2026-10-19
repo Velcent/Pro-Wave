@@ -430,10 +430,16 @@ jobs:
           # Checksum lists (SHA256SUMS and any other file starting with SHA) are not published.
           rm -f artifacts/SHA*
           ls -l artifacts
-          sed "s/@VERSION@/${TAG#v}/g; s/@TAG@/$TAG/g" dist/release-notes.md > notes.md
-          # A re-run of the same tag replaces the files instead of failing on the existing Release.
+          dist/release-notes.sh "$TAG" > notes.md
+          cat notes.md
+          # A re-run of the same tag replaces the files and the notes instead of failing on the
+          # existing Release, and removes checksum lists an older run attached.
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" artifacts/* --clobber
+            gh release edit "$TAG" --notes-file notes.md
+            gh release view "$TAG" --json assets --jq '.assets[].name' \
+              | { grep '^SHA' || true; } \
+              | while read -r name; do gh release delete-asset "$TAG" "$name" --yes; done
           else
             gh release create "$TAG" artifacts/* --title "Pro Wave ${TAG#v}" \
               --notes-file notes.md --prerelease --verify-tag
