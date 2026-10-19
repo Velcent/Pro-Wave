@@ -1,6 +1,6 @@
 # Pro Wave
 
-**ProWave Studio** is an open-source music production app (DAW) in pure Rust, with a look and
+**ProWave** is an open-source music production app (DAW) in pure Rust, with a look and
 workflow modelled on Apple's Logic Pro. It is drawn entirely with [egui](https://github.com/emilk/egui)
 and plays audio through [cpal](https://github.com/RustAudio/cpal): no Electron, no JUCE.
 
