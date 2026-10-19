@@ -21,6 +21,8 @@ being released into the GitHub Release notes, so keep one `## <version>` heading
   instead of inside the window, with a Pro Wave menu (About, Hide, Quit ⌘Q), the ⌘N, ⌘O, ⌘S and
   ⇧⌘S key commands, check marks in the View menu and an Open Recent submenu. Errors and warnings
   show on a thin line at the top of the window.
+- **Fixed:** the Dock icon switched from the Pro Wave icon on its rounded tile to the bare logo
+  once the app had started. It now keeps the app's icon.
 
 ### Windows
 

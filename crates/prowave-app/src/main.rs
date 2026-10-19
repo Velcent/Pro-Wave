@@ -339,10 +339,17 @@ fn main() -> eframe::Result {
         .with_title("Pro Wave — Untitled - Tracks")
         // Window class: lets Linux desktops match the window to its .desktop entry and icon.
         .with_app_id("prowave");
-    // Title bar / taskbar / dock icon. A broken icon must not stop the app from starting.
-    match eframe::icon_data::from_png_bytes(APP_ICON_PNG) {
-        Ok(icon) => viewport = viewport.with_icon(icon),
-        Err(e) => tracing::warn!("app icon could not be decoded: {e}"),
+    // Title bar / taskbar icon. A broken icon must not stop the app from starting.
+    // macOS takes the Dock icon from the app bundle (prowave.icns, on the macOS icon tile);
+    // setting one here would swap it for the bare logo once the app is running. An empty
+    // icon tells eframe to leave the Dock icon alone instead of using its default egui logo.
+    if cfg!(target_os = "macos") {
+        viewport = viewport.with_icon(egui::IconData::default());
+    } else {
+        match eframe::icon_data::from_png_bytes(APP_ICON_PNG) {
+            Ok(icon) => viewport = viewport.with_icon(icon),
+            Err(e) => tracing::warn!("app icon could not be decoded: {e}"),
+        }
     }
     let opts = eframe::NativeOptions {
         viewport,
