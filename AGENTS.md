@@ -1,4 +1,4 @@
-# AGENTS.md — Multi-Agent Development Protocol for Pro Wave (Logic Pro Clone)
+# AGENTS.md — Multi-Agent Development Protocol for Pro Wave
 This file tells AI coding agents (Claude Code, Codex, Cursor, Jolly) how to work in this repo. If you are an AI agent, read this first.
 
 ## 1. Project Intent
