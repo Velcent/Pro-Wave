@@ -13,6 +13,33 @@ pub fn stroke(c: Color32) -> Stroke {
     Stroke::new(1.3, c)
 }
 
+/// Whether `resp` asks for its right-click menu this frame: a right-click (or long touch), and
+/// on macOS also a Control-click, as with a one-button mouse or a trackpad.
+pub fn context_click(resp: &Response) -> bool {
+    let control_click =
+        cfg!(target_os = "macos") && resp.clicked() && resp.ctx.input(|i| i.modifiers.ctrl);
+    resp.secondary_clicked() || control_click
+}
+
+/// Right-click menu at the pointer for `resp` (see [`context_click`]). Closes when an entry is
+/// clicked, the pointer clicks elsewhere or Escape is pressed.
+pub fn context_menu(resp: &Response, add_contents: impl FnOnce(&mut Ui)) {
+    let open = if context_click(resp) {
+        Some(egui::SetOpenCommand::Bool(true))
+    } else if resp.clicked() {
+        Some(egui::SetOpenCommand::Bool(false))
+    } else {
+        None
+    };
+    egui::Popup::menu(resp)
+        .open_memory(open)
+        .at_pointer_fixed()
+        .show(|ui| {
+            ui.set_min_width(190.0);
+            add_contents(ui);
+        });
+}
+
 /// Text button with a small down chevron (Logic's "Edit ⌄"). Returns the response and width.
 pub fn menu_title(
     ui: &Ui,
@@ -96,6 +123,36 @@ pub fn back_chevron(g: &Painter, at: egui::Pos2) {
 }
 
 /// Entries that exist in Logic but are not implemented yet are drawn disabled.
+/// Undo and Redo entries for the local Edit menus, greyed when there is nothing to undo or
+/// redo. The one picked goes to `pick` (and from there to `UiState::undo_cmd`).
+pub fn undo_items(
+    ui: &mut Ui,
+    can_undo: bool,
+    can_redo: bool,
+    pick: &mut Option<crate::undo::UndoCmd>,
+) {
+    use egui::{Key, KeyboardShortcut, Modifiers};
+    let key = |m, k| ui.ctx().format_shortcut(&KeyboardShortcut::new(m, k));
+    let (undo_key, redo_key) = (
+        key(Modifiers::COMMAND, Key::Z),
+        key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z),
+    );
+    if ui
+        .add_enabled(can_undo, egui::Button::new("Undo").shortcut_text(undo_key))
+        .clicked()
+    {
+        *pick = Some(crate::undo::UndoCmd::Undo);
+        ui.close();
+    }
+    if ui
+        .add_enabled(can_redo, egui::Button::new("Redo").shortcut_text(redo_key))
+        .clicked()
+    {
+        *pick = Some(crate::undo::UndoCmd::Redo);
+        ui.close();
+    }
+}
+
 pub fn todo_item(ui: &mut Ui, label: &str) {
     ui.add_enabled(false, egui::Button::new(label));
 }

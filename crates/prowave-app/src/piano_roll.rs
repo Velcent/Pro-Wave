@@ -218,6 +218,10 @@ struct Actions {
     select_all: bool,
     quantize: bool,
     scale: bool,
+    /// Whether there is something to undo / redo, and the one picked in the Edit menu.
+    can_undo: bool,
+    can_redo: bool,
+    undo: Option<crate::undo::UndoCmd>,
 }
 
 fn toolbar(
@@ -244,8 +248,7 @@ fn toolbar(
     x += w + 2.0;
     egui::Popup::menu(&edit).show(|ui| {
         ui.set_min_width(230.0);
-        todo_item(ui, "Undo");
-        todo_item(ui, "Redo");
+        crate::widgets::undo_items(ui, act.can_undo, act.can_redo, &mut act.undo);
         ui.separator();
         if ui
             .add_enabled(has_sel, egui::Button::new("Delete").shortcut_text("Del"))
@@ -448,10 +451,16 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         select_all: false,
         quantize: false,
         scale: false,
+        can_undo: s.can_undo,
+        can_redo: s.can_redo,
+        undo: None,
     };
     let mut snap = s.tracks.snap;
     toolbar(ui, bar, &mut s.piano, has_sel, &mut snap, &mut act);
     s.tracks.snap = snap;
+    if act.undo.is_some() {
+        s.undo_cmd = act.undo;
+    }
 
     let Some((ti, ri)) = region else {
         g.text(

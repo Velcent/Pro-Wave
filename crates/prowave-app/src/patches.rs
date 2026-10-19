@@ -411,6 +411,30 @@ pub fn synth_patch(t: &Track) -> SynthPatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every Library patch, played over the demo song's notes on one track: no sample and no
+    /// peak meter may go NaN or infinite (a GitHub report: Mellow Grand's meter stuck at inf).
+    #[test]
+    fn every_library_patch_plays_finite_audio() {
+        let mut bad = Vec::new();
+        for cat in CATEGORIES {
+            for name in cat.patches {
+                let mut p = Project::demo();
+                let mut t = p.tracks.remove(0);
+                t.category = Some(cat.name);
+                t.name = (*name).to_string();
+                p.tracks = vec![t];
+                let r = crate::bench::render(&p, 6.0);
+                if r.non_finite > 0 || !r.bad_meters.is_empty() {
+                    bad.push(format!(
+                        "{} / {name}: {} bad samples",
+                        cat.name, r.non_finite
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "non-finite audio from: {bad:#?}");
+    }
     use crate::library::CATEGORIES;
     use crate::model::Project;
 

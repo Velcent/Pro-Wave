@@ -895,6 +895,8 @@ fn toolbar(ui: &Ui, s: &mut UiState, bar: Rect) {
     );
     let cy = bar.center().y;
     back_chevron(&g, pos2(bar.left() + 16.0, cy));
+    let (can_undo, can_redo) = (s.can_undo, s.can_redo);
+    let mut undo_pick = None;
     let v = &mut s.mixer;
 
     let mut x = bar.left() + 32.0;
@@ -902,9 +904,8 @@ fn toolbar(ui: &Ui, s: &mut UiState, bar: Rect) {
     x += w + 2.0;
     egui::Popup::menu(&edit).show(|ui| {
         ui.set_min_width(220.0);
+        crate::widgets::undo_items(ui, can_undo, can_redo, &mut undo_pick);
         for item in [
-            "Undo",
-            "Redo",
             "Copy Channel Strip",
             "Paste Channel Strip",
             "Select Audio Channel Strips",
@@ -912,6 +913,9 @@ fn toolbar(ui: &Ui, s: &mut UiState, bar: Rect) {
             todo_item(ui, item);
         }
     });
+    if undo_pick.is_some() {
+        s.undo_cmd = undo_pick;
+    }
     let (options, w) = menu_title(ui, &g, x, cy, "Options", id(NS, "Options"));
     x += w + 2.0;
     egui::Popup::menu(&options).show(|ui| {
@@ -936,30 +940,83 @@ fn toolbar(ui: &Ui, s: &mut UiState, bar: Rect) {
         todo_item(ui, "Show Signal Flow Channel Strips");
     });
 
-    // Sends on Faders (no sends yet: only "Off").
-    g.text(
-        pos2(x, cy),
-        Align2::LEFT_CENTER,
-        "Sends on Faders:",
-        FontId::proportional(12.5),
-        TEXT_DIM,
-    );
-    let pw = pos2(x + 112.0, cy + 1.0);
-    g.circle_stroke(pw, 5.5, stroke(TEXT_DIM));
-    g.line_segment(
-        [pw + vec2(0.0, -7.5), pw + vec2(0.0, -1.5)],
-        Stroke::new(3.0, TOOLBAR_BG),
-    );
-    g.line_segment(
-        [pw + vec2(0.0, -7.0), pw + vec2(0.0, -2.0)],
-        stroke(TEXT_DIM),
-    );
-    let sof = Rect::from_min_size(pos2(x + 126.0, cy - 10.0), vec2(110.0, 20.0));
-    let resp = popup_button(ui, &g, sof, id(NS, "sends_on_faders"), "Off");
-    egui::Popup::menu(&resp).show(|ui| {
-        let _ = ui.selectable_label(true, "Off");
-        todo_item(ui, "Bus 1");
-    });
+    let menus_end = x;
+    // Right-hand side first (strip width buttons, then filters), so the rest can be fitted
+    // into what is left.
+    let mut rx = bar.right() - 8.0;
+    for (wide, key) in [(true, "wide"), (false, "narrow")] {
+        let r = Rect::from_min_size(pos2(rx - 26.0, cy - 10.0), vec2(26.0, 20.0));
+        let resp = ui.interact(r, id(NS, key), Sense::click());
+        if v.wide == wide {
+            g.rect_filled(r, 4.0, Color32::from_gray(0x5a));
+        }
+        let c = r.center();
+        let iw = if wide { 13.0 } else { 9.0 };
+        g.rect_stroke(
+            Rect::from_center_size(c, vec2(iw, 11.0)),
+            1.5,
+            stroke(TEXT),
+            StrokeKind::Middle,
+        );
+        g.line_segment([c + vec2(0.0, -5.5), c + vec2(0.0, 5.5)], stroke(TEXT));
+        if resp.clicked() {
+            v.wide = wide;
+        }
+        rx = r.left() - 4.0;
+    }
+    rx -= 10.0;
+    let filter_widths: Vec<f32> = FILTERS
+        .iter()
+        .map(|label| {
+            g.layout_no_wrap((*label).into(), FontId::proportional(12.5), TEXT)
+                .size()
+                .x
+                + 16.0
+        })
+        .collect();
+    let filters_w = filter_widths.iter().map(|w| w + 3.0).sum::<f32>();
+    let fit = fit_toolbar(menus_end, bar.center().x, rx, filters_w);
+
+    if fit.filters_inline {
+        for (i, label) in FILTERS.iter().enumerate().rev() {
+            let w = filter_widths[i];
+            let r = Rect::from_min_size(pos2(rx - w, cy - 10.0), vec2(w, 20.0));
+            let resp = ui.interact(r, id(NS, ("filter", i)), Sense::click());
+            let on = v.filters[i];
+            g.rect_filled(r, 4.0, if on { BLUE } else { Color32::from_gray(0x50) });
+            g.text(
+                r.center(),
+                Align2::CENTER_CENTER,
+                *label,
+                FontId::proportional(12.5),
+                if on { Color32::WHITE } else { TEXT_DIM },
+            );
+            if resp.clicked() {
+                v.filters[i] = !v.filters[i];
+            }
+            rx = r.left() - 3.0;
+        }
+    } else {
+        // Not enough room for a button per strip type: one menu with a check for each.
+        let r = Rect::from_min_size(
+            pos2(rx - FILTER_MENU_W, cy - 10.0),
+            vec2(FILTER_MENU_W, 20.0),
+        );
+        let resp = popup_button(ui, &g, r, id(NS, "filters_menu"), "Show");
+        egui::Popup::menu(&resp).show(|ui| {
+            ui.set_min_width(160.0);
+            for (i, label) in FILTERS.iter().enumerate() {
+                if ui.checkbox(&mut v.filters[i], *label).clicked() {
+                    ui.close();
+                }
+            }
+        });
+    }
+
+    if fit.show_sends {
+        draw_sends_on_faders(ui, &g, menus_end, cy);
+    }
+    let left = fit.modes_left;
 
     // Single | Tracks | All
     let modes = [
@@ -967,8 +1024,7 @@ fn toolbar(ui: &Ui, s: &mut UiState, bar: Rect) {
         (MixerMode::Tracks, "Tracks"),
         (MixerMode::All, "All"),
     ];
-    let seg_w = 58.0;
-    let left = bar.center().x - seg_w * 1.5 + 60.0;
+    let seg_w = MODE_W / 3.0;
     for (i, (m, label)) in modes.iter().enumerate() {
         let r = Rect::from_min_size(
             pos2(left + i as f32 * seg_w, cy - 10.0),
@@ -992,52 +1048,73 @@ fn toolbar(ui: &Ui, s: &mut UiState, bar: Rect) {
             v.mode = *m;
         }
     }
+}
 
-    // Narrow/wide strip buttons at the right edge, then the strip-type filters.
-    let mut rx = bar.right() - 8.0;
-    for (wide, key) in [(true, "wide"), (false, "narrow")] {
-        let r = Rect::from_min_size(pos2(rx - 26.0, cy - 10.0), vec2(26.0, 20.0));
-        let resp = ui.interact(r, id(NS, key), Sense::click());
-        if v.wide == wide {
-            g.rect_filled(r, 4.0, Color32::from_gray(0x5a));
-        }
-        let c = r.center();
-        let iw = if wide { 13.0 } else { 9.0 };
-        g.rect_stroke(
-            Rect::from_center_size(c, vec2(iw, 11.0)),
-            1.5,
-            stroke(TEXT),
-            StrokeKind::Middle,
-        );
-        g.line_segment([c + vec2(0.0, -5.5), c + vec2(0.0, 5.5)], stroke(TEXT));
-        if resp.clicked() {
-            v.wide = wide;
-        }
-        rx = r.left() - 4.0;
+/// Width of the Single | Tracks | All switch, of the "Sends on Faders" group and of the
+/// "Show" menu that replaces the filter buttons when they do not fit.
+const MODE_W: f32 = 174.0;
+const SENDS_W: f32 = 236.0;
+const FILTER_MENU_W: f32 = 70.0;
+const TOOLBAR_GAP: f32 = 10.0;
+
+/// Where the Mixer toolbar's groups go so that none overlaps another: the mode switch at the
+/// centre when there is room, else just left of the filters; the filters as buttons when they
+/// fit, else as one menu; "Sends on Faders" only in the room left over.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct ToolbarFit {
+    modes_left: f32,
+    filters_inline: bool,
+    show_sends: bool,
+}
+
+fn fit_toolbar(menus_end: f32, center: f32, right_end: f32, filters_w: f32) -> ToolbarFit {
+    let place = |filters_left: f32| {
+        let centred = center - MODE_W / 2.0 + 60.0;
+        centred.min(filters_left - TOOLBAR_GAP - MODE_W)
+    };
+    let mut filters_inline = true;
+    let mut modes_left = place(right_end - filters_w);
+    if modes_left < menus_end + TOOLBAR_GAP {
+        filters_inline = false;
+        modes_left = place(right_end - FILTER_MENU_W);
     }
-    rx -= 10.0;
-    for (i, label) in FILTERS.iter().enumerate().rev() {
-        let w = g
-            .layout_no_wrap((*label).into(), FontId::proportional(12.5), TEXT)
-            .size()
-            .x
-            + 16.0;
-        let r = Rect::from_min_size(pos2(rx - w, cy - 10.0), vec2(w, 20.0));
-        let resp = ui.interact(r, id(NS, ("filter", i)), Sense::click());
-        let on = v.filters[i];
-        g.rect_filled(r, 4.0, if on { BLUE } else { Color32::from_gray(0x50) });
-        g.text(
-            r.center(),
-            Align2::CENTER_CENTER,
-            *label,
-            FontId::proportional(12.5),
-            if on { Color32::WHITE } else { TEXT_DIM },
-        );
-        if resp.clicked() {
-            v.filters[i] = !v.filters[i];
-        }
-        rx = r.left() - 3.0;
+    // When even that is too tight, the modes stay just after the menus (the panel has a
+    // minimum width, so this only happens in very narrow windows).
+    modes_left = modes_left.max(menus_end + TOOLBAR_GAP);
+    let show_sends = menus_end + SENDS_W + TOOLBAR_GAP <= modes_left;
+    ToolbarFit {
+        modes_left,
+        filters_inline,
+        show_sends,
     }
+}
+
+fn draw_sends_on_faders(ui: &Ui, g: &egui::Painter, x: f32, cy: f32) {
+    const NS: &str = "mixer_toolbar";
+    // Sends on Faders (no sends yet: only "Off").
+    g.text(
+        pos2(x, cy),
+        Align2::LEFT_CENTER,
+        "Sends on Faders:",
+        FontId::proportional(12.5),
+        TEXT_DIM,
+    );
+    let pw = pos2(x + 112.0, cy + 1.0);
+    g.circle_stroke(pw, 5.5, stroke(TEXT_DIM));
+    g.line_segment(
+        [pw + vec2(0.0, -7.5), pw + vec2(0.0, -1.5)],
+        Stroke::new(3.0, TOOLBAR_BG),
+    );
+    g.line_segment(
+        [pw + vec2(0.0, -7.0), pw + vec2(0.0, -2.0)],
+        stroke(TEXT_DIM),
+    );
+    let sof = Rect::from_min_size(pos2(x + 126.0, cy - 10.0), vec2(110.0, 20.0));
+    let resp = popup_button(ui, g, sof, id(NS, "sends_on_faders"), "Off");
+    egui::Popup::menu(&resp).show(|ui| {
+        let _ = ui.selectable_label(true, "Off");
+        todo_item(ui, "Bus 1");
+    });
 }
 
 /// Whether a strip of `kind` is shown with the toolbar's filter buttons set as `filters`
@@ -1153,6 +1230,25 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toolbar_groups_never_overlap_and_give_way_in_order() {
+        // Wide panel: modes centred, every filter a button, Sends on Faders shown.
+        let f = fit_toolbar(200.0, 1200.0, 2300.0, 520.0);
+        assert!(f.filters_inline && f.show_sends);
+        assert_eq!(f.modes_left, 1200.0 - MODE_W / 2.0 + 60.0);
+
+        // Narrower: the modes move left of the filters, Sends on Faders goes first.
+        let f = fit_toolbar(200.0, 700.0, 1100.0, 520.0);
+        assert!(f.filters_inline && !f.show_sends);
+        assert!(f.modes_left + MODE_W + TOOLBAR_GAP <= 1100.0 - 520.0);
+        assert!(f.modes_left >= 200.0 + TOOLBAR_GAP);
+
+        // Narrower still: the filters fold into one menu.
+        let f = fit_toolbar(200.0, 500.0, 700.0, 520.0);
+        assert!(!f.filters_inline);
+        assert!(f.modes_left + MODE_W + TOOLBAR_GAP <= 700.0 - FILTER_MENU_W);
+    }
 
     #[test]
     fn strips_follow_the_filter_buttons_and_folders_have_none() {

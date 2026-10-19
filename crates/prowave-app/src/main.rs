@@ -5,8 +5,10 @@
 #[global_allocator]
 static ALLOC_GUARD: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
 
+mod bench;
 mod engine_sync;
 mod file_commands;
+mod graphics;
 mod import;
 mod inspector;
 mod library;
@@ -24,7 +26,10 @@ mod theme;
 mod track_icons;
 mod tracks_area;
 mod transport;
+mod ui_scale;
+mod undo;
 mod widgets;
+mod window_chrome;
 
 use model::Project;
 
@@ -66,6 +71,13 @@ pub struct UiState {
     pub light_menus: bool,
     /// The Project Chooser, while it covers the window (File > New from Template…).
     pub chooser: Option<start_screen::Chooser>,
+    /// The user's interface size (1.0 = 100 %), on top of fitting small windows (`ui_scale`).
+    pub ui_scale: f32,
+    /// Edit > Undo / Redo picked this frame; run by `App` (which keeps the history).
+    pub undo_cmd: Option<undo::UndoCmd>,
+    /// Whether there is something to undo / redo (greys the Edit entries).
+    pub can_undo: bool,
+    pub can_redo: bool,
 }
 
 impl UiState {
@@ -91,6 +103,10 @@ impl UiState {
             cpu_load: 0.0,
             light_menus: false,
             chooser: None,
+            ui_scale: 1.0,
+            undo_cmd: None,
+            can_undo: false,
+            can_redo: false,
         }
     }
 
@@ -117,6 +133,14 @@ struct App {
     saved: prowave_project::ProjectDoc,
     /// macOS: the menus in the system menu bar (elsewhere they are drawn in the window).
     native_menu: Option<native_menu::NativeMenu>,
+    /// `--bench <file>`: measuring startup, memory and DSP load, then closing.
+    bench: Option<bench::Probe>,
+    /// `--layout-shots <folder>`: pictures of the layout at several window sizes, then closing.
+    shots: Option<bench::LayoutShots>,
+    /// Edit > Undo / Redo.
+    history: undo::History,
+    /// Frames since the history last looked for an edit.
+    frames_since_record: u32,
 }
 
 impl App {
@@ -132,6 +156,47 @@ impl App {
 }
 
 impl App {
+    /// Records finished edits for Undo, and runs Undo / Redo. An edit is looked for when a
+    /// gesture ends (button let go, key, menu) and every half second (menus in the macOS menu
+    /// bar send no input events), never in the middle of a drag.
+    fn track_history(&mut self, ctx: &egui::Context) {
+        self.frames_since_record += 1;
+        let (gesture_ended, dragging) = ctx.input(|i| {
+            let ended = i.pointer.any_released()
+                || i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Key { pressed: true, .. }
+                            | egui::Event::Text(_)
+                            | egui::Event::Paste(_)
+                    )
+                });
+            (ended, i.pointer.any_down())
+        });
+        let undo_cmd = self.ui.undo_cmd.take();
+        if !dragging && (gesture_ended || undo_cmd.is_some() || self.frames_since_record >= 30) {
+            self.frames_since_record = 0;
+            self.history.record(&self.project);
+        }
+        let changed = match undo_cmd {
+            Some(undo::UndoCmd::Undo) => self.history.undo(&mut self.project),
+            Some(undo::UndoCmd::Redo) => self.history.redo(&mut self.project),
+            Some(undo::UndoCmd::Clear) => {
+                self.history.clear(&self.project);
+                false
+            }
+            None => false,
+        };
+        if changed {
+            // Track and region numbers may point elsewhere now.
+            self.ui.tracks.selected = None;
+            self.ui.piano.selected.clear();
+            ctx.request_repaint();
+        }
+        self.ui.can_undo = self.history.can_undo();
+        self.ui.can_redo = self.history.can_redo();
+    }
+
     /// The window while the Project Chooser is up: the menu bar and the chooser, with the
     /// File key commands and prompts still working.
     fn chooser_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -166,6 +231,7 @@ impl App {
             self.run_file_cmd(cmd, ctx);
         }
         self.show_save_prompt(ctx);
+        window_chrome::resize_edges(ctx);
     }
 }
 
@@ -173,6 +239,19 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let dt = ctx.input(|i| i.stable_dt) as f64;
+        ui_scale::apply(&ctx, self.ui.ui_scale);
+        if let Some(probe) = self.bench.as_mut() {
+            if probe.frame(&ctx) {
+                self.bench = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+        if let Some(shots) = self.shots.as_mut() {
+            if shots.frame(&ctx) {
+                self.shots = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
         if self.ui.chooser.is_some() {
             self.chooser_ui(ui, &ctx);
             return;
@@ -243,9 +322,13 @@ impl eframe::App for App {
                 .show(ui, |ui| inspector::show(ui, p, s, &meters));
         }
         if s.show_mixer || s.bottom == Bottom::PianoRoll {
+            // Starts at about half of the space under the control bar (500 points at most), so
+            // the Tracks area keeps room on short screens. (No upper limit: egui hides a panel
+            // whose size falls outside its range when the window shrinks.)
+            let room = ui.available_height();
             egui::Panel::bottom("bottom")
                 .resizable(true)
-                .default_size(500.0)
+                .default_size((room * 0.48).clamp(160.0, 500.0))
                 .frame(egui::Frame::new())
                 .show(ui, |ui| match s.bottom {
                     Bottom::Mixer => mixer::show(ui, p, s, &meters),
@@ -293,6 +376,8 @@ impl eframe::App for App {
         }
         self.show_save_prompt(&ctx);
         self.show_revert_prompt(&ctx);
+        self.track_history(&ctx);
+        window_chrome::resize_edges(&ctx);
     }
 }
 
@@ -301,9 +386,13 @@ impl eframe::App for App {
 fn top_bar(ui: &mut egui::Ui, p: &mut Project, s: &mut UiState) {
     let frame = egui::Frame::side_top_panel(ui.style()).fill(menus::bar_fill(s.light_menus));
     if menus::IN_WINDOW {
-        egui::Panel::top("menu")
+        let bar = egui::Panel::top("menu")
             .frame(frame)
             .show(ui, |ui| menus::menu_bar(ui, p, s));
+        if window_chrome::CUSTOM {
+            let fg = menus::bar_text(s.light_menus);
+            window_chrome::bar_controls(ui, bar.response.rect, bar.inner + 8.0, fg);
+        }
     } else if menus::has_status(p, s) {
         egui::Panel::top("status")
             .frame(frame)
@@ -323,6 +412,12 @@ fn init_logging() {
 const APP_ICON_PNG: &[u8] = include_bytes!("../assets/icon-256.png");
 
 fn main() -> eframe::Result {
+    bench::mark_start();
+    let all_args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let bench_out = bench::requested(&all_args);
+    let shots_dir = bench::shots_requested(&all_args);
+    // Measuring runs leave the user's settings (first launch, recent projects, size) alone.
+    let measuring = bench_out.is_some() || shots_dir.is_some();
     // Release builds: on a crash, write a report to the temp folder instead of a raw panic.
     human_panic::setup_panic!(human_panic::Metadata::new(
         "Pro Wave",
@@ -332,10 +427,17 @@ fn main() -> eframe::Result {
     project_io::remove_stale_media(std::time::Duration::from_secs(7 * 24 * 3600));
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1600.0, 980.0])
+        // Smaller than this the panels have no room left, even scaled down.
+        .with_min_inner_size([800.0, 520.0])
+        // Fill the screen, as Logic does; on a small screen 1600 x 980 would not fit.
+        .with_maximized(true)
         // Just the app name, on every system: no project name or view in the title bar.
         .with_title("Pro Wave")
         // Window class: lets Linux desktops match the window to its .desktop entry and icon.
-        .with_app_id("prowave");
+        .with_app_id("prowave")
+        // Windows and Linux: no title bar from the system; the menu bar row has the window
+        // buttons (see window_chrome.rs).
+        .with_decorations(!window_chrome::CUSTOM);
     // Title bar / taskbar icon. A broken icon must not stop the app from starting.
     // macOS takes the Dock icon from the app bundle (prowave.icns, on the macOS icon tile);
     // setting one here would swap it for the bare logo once the app is running. An empty
@@ -350,6 +452,7 @@ fn main() -> eframe::Result {
     }
     let opts = eframe::NativeOptions {
         viewport,
+        wgpu_options: graphics::config(),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -357,12 +460,17 @@ fn main() -> eframe::Result {
         opts,
         Box::new(|cc| {
             theme::apply(&cc.egui_ctx);
-            // The very first start shows the demo song; later starts begin clean.
-            let project = if recent_files::take_first_launch() {
-                Project::demo()
-            } else {
-                Project::empty()
-            };
+            // Cmd/Ctrl + = / - / 0 resize the interface through `ui_scale` instead, which
+            // also keeps the fit for small windows.
+            cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+            // The very first start shows the demo song; later starts begin clean. A benchmark
+            // run always starts clean and leaves the first launch to the user.
+            let project =
+                if shots_dir.is_some() || (!measuring && recent_files::take_first_launch()) {
+                    Project::demo()
+                } else {
+                    Project::empty()
+                };
             let mut audio_error = None;
             let sync = match prowave_engine::Engine::start() {
                 Ok(e) => Some(engine_sync::EngineSync::new(e, &project)),
@@ -374,22 +482,34 @@ fn main() -> eframe::Result {
             };
             let mut app = App {
                 saved: file_commands::content(&project),
+                history: undo::History::new(&project),
                 project,
                 ui: UiState::new(),
                 sync,
                 path: None,
                 native_menu: None,
+                bench: bench_out.clone().map(bench::Probe::new),
+                shots: shots_dir.clone().map(bench::LayoutShots::new),
+                frames_since_record: 0,
             };
             #[cfg(target_os = "macos")]
             {
                 app.native_menu = Some(native_menu::NativeMenu::install(&cc.egui_ctx));
             }
             app.ui.status = audio_error;
-            app.ui.recent = recent_files::Recent::load();
+            if !measuring {
+                app.ui.recent = recent_files::Recent::load();
+                app.ui.ui_scale = ui_scale::load();
+            }
             // `prowave song.prowave` opens a project; `prowave song.wav drums.aiff` imports each
             // file as an audio track (into the opened project, if any).
             // `--play` starts the transport on launch; `--piano` opens the Piano Roll.
-            let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+            // A benchmark run takes no other arguments.
+            let args: Vec<std::ffi::OsString> = if measuring {
+                Vec::new()
+            } else {
+                std::env::args_os().skip(1).collect()
+            };
             let is_project = |a: &std::ffi::OsString| {
                 std::path::Path::new(a)
                     .extension()
@@ -412,6 +532,10 @@ fn main() -> eframe::Result {
     );
     // The app (and with it the engine's open media files) is gone by now.
     project_io::remove_session_media();
+    if let (Some(out), Err(e)) = (&bench_out, &result) {
+        bench::report_without_window(out, &e.to_string());
+        return Ok(());
+    }
     result
 }
 

@@ -99,7 +99,10 @@ mod mac {
     pub struct NativeMenu {
         _menu: Menu,
         events: mpsc::Receiver<String>,
-        checks: Vec<(&'static str, CheckMenuItem, bool)>,
+        /// Check-mark entries: (label, item, checked, enabled) as last shown.
+        checks: Vec<(&'static str, CheckMenuItem, bool, bool)>,
+        /// Other entries: (label, item, enabled) as last shown.
+        plains: Vec<(&'static str, MenuItem, bool)>,
         recent_menu: Submenu,
         recent_shown: Vec<PathBuf>,
     }
@@ -157,6 +160,7 @@ mod mac {
             let _ = menu.append(&app_menu);
 
             let mut checks = Vec::new();
+            let mut plains = Vec::new();
             let recent_menu = Submenu::new("Open Recent", true);
             for (title, items) in menus::MENUS {
                 let sub = Submenu::new(title, true);
@@ -169,7 +173,8 @@ mod mac {
                         let _ = sub.append(&recent_menu);
                         continue;
                     }
-                    let enabled = !menus::GREYED.contains(&label);
+                    // Brought up to date by the first `update`.
+                    let enabled = true;
                     let item: Box<dyn IsMenuItem> = match kind(label) {
                         Kind::Skip => continue,
                         Kind::System(SystemItem::Minimize) => {
@@ -186,15 +191,19 @@ mod mac {
                         }
                         Kind::Check => {
                             let c = CheckMenuItem::with_id(label, label, enabled, false, None);
-                            checks.push((label, c.clone(), false));
+                            checks.push((label, c.clone(), false, enabled));
                             Box::new(c)
                         }
-                        Kind::Plain(accel) => Box::new(MenuItem::with_id(
-                            label,
-                            label,
-                            enabled,
-                            accel.and_then(accelerator),
-                        )),
+                        Kind::Plain(accel) => {
+                            let m = MenuItem::with_id(
+                                label,
+                                label,
+                                enabled,
+                                accel.and_then(accelerator),
+                            );
+                            plains.push((label, m.clone(), enabled));
+                            Box::new(m)
+                        }
                     };
                     let _ = sub.append(item.as_ref());
                 }
@@ -210,6 +219,7 @@ mod mac {
                 _menu: menu,
                 events,
                 checks,
+                plains,
                 recent_menu,
                 // Differs from any real list, so the first `update` fills Open Recent.
                 recent_shown: vec![PathBuf::from("\0")],
@@ -258,11 +268,23 @@ mod mac {
                     menus::apply(&id, p, s);
                 }
             }
-            for (label, item, shown) in &mut self.checks {
+            for (label, item, shown, was_enabled) in &mut self.checks {
                 let now = menus::checked(label, s);
                 if now != *shown {
                     item.set_checked(now);
                     *shown = now;
+                }
+                let on = menus::enabled(label, p, s);
+                if on != *was_enabled {
+                    item.set_enabled(on);
+                    *was_enabled = on;
+                }
+            }
+            for (label, item, was_enabled) in &mut self.plains {
+                let on = menus::enabled(label, p, s);
+                if on != *was_enabled {
+                    item.set_enabled(on);
+                    *was_enabled = on;
                 }
             }
             let paths = s.recent.paths().to_vec();

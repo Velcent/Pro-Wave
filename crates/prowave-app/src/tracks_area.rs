@@ -7,7 +7,10 @@
 //! Menu entries that are not implemented yet are shown disabled.
 use crate::model::{Project, Region, Track, TrackKind};
 use crate::track_icons::{draw_icon, track_icon};
-use crate::widgets::{menu_title, popup_button, stroke, todo_item, BLUE, BTN_BG, TEXT, TEXT_DIM};
+use crate::widgets::{
+    context_click, context_menu, menu_title, popup_button, stroke, todo_item, BLUE, BTN_BG, TEXT,
+    TEXT_DIM,
+};
 use crate::{Bottom, UiState};
 use egui::{
     pos2, vec2, Align2, Color32, FontId, Key, KeyboardShortcut, Modifiers, Painter, Pos2, Rect,
@@ -118,6 +121,8 @@ pub struct TracksView {
     pub catch: bool,
     /// (track, region)
     pub selected: Option<(usize, usize)>,
+    /// Width of the lanes at the last frame (for Navigate > Zoom to Fit).
+    pub lanes_w: f32,
     grab_beats: f64,
     cycle_anchor: Option<f64>,
 }
@@ -129,6 +134,7 @@ impl Default for TracksView {
             row_h: 56.0,
             scroll_x: 0.0,
             scroll_y: 0.0,
+            lanes_w: 1000.0,
             snap: Snap::Smart,
             drag_mode: DragMode::NoOverlap,
             catch: true,
@@ -421,6 +427,8 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
         Stroke::new(1.0, Color32::from_gray(0x24)),
     );
     let cy = bar.center().y;
+    let (can_undo, can_redo) = (s.can_undo, s.can_redo);
+    let mut undo_pick = None;
     let v = &mut s.tracks;
 
     // Back chevron (dim: no previous view to return to).
@@ -436,8 +444,7 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
     x += w + 2.0;
     egui::Popup::menu(&edit).show(|ui| {
         ui.set_min_width(260.0);
-        todo_item(ui, "Undo");
-        todo_item(ui, "Redo");
+        crate::widgets::undo_items(ui, can_undo, can_redo, &mut undo_pick);
         ui.separator();
         todo_item(ui, "Cut");
         todo_item(ui, "Copy");
@@ -468,6 +475,9 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
             ui.close();
         }
     });
+    if undo_pick.is_some() {
+        s.undo_cmd = undo_pick;
+    }
     let (func, w) = menu_title(ui, &g, x, cy, "Functions", id(("menu", "Functions")));
     x += w + 2.0;
     egui::Popup::menu(&func).show(|ui| {
@@ -524,6 +534,7 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
     if icon_button(ui, &g, r, "catch", v.catch, draw_catch_icon).clicked() {
         v.catch = !v.catch;
     }
+    let left_end = x + 90.0;
 
     // Right-hand side, laid out from the right edge.
     // Horizontal zoom (log scale, 6..600 points per bar).
@@ -543,9 +554,14 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
         v.row_h = 36.0 + t2 * (140.0 - 36.0);
     }
     draw_zoom_icon(&g, pos2(vz.left() - 13.0, cy), TEXT, true);
-    // Waveform zoom / fit buttons (not implemented yet: drawn dim).
+    // What fits between the two sides; the rest is left out rather than drawn on top.
     let mut rx = vz.left() - 30.0;
+    let show = fit_toolbar(rx - left_end);
+    // Waveform zoom / fit buttons (not implemented yet: drawn dim).
     for i in 0..2 {
+        if !show.wave {
+            break;
+        }
         let c = pos2(rx - 10.0 - i as f32 * 26.0, cy);
         g.line_segment(
             [c + vec2(-5.0, -6.0), c + vec2(-5.0, 6.0)],
@@ -558,10 +574,63 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
             g.line_segment([c + vec2(0.0, -4.0), c + vec2(0.0, 4.0)], stroke(TEXT_DIM));
         }
     }
-    rx -= 62.0;
+    if show.wave {
+        rx -= 62.0;
+    }
 
+    if show.drag {
+        rx = drag_menu(ui, &g, v, rx, cy);
+    }
+    if show.snap {
+        rx = snap_menu(ui, &g, v, rx, cy);
+    }
+    if show.tools {
+        tool_menus(ui, &g, rx, cy);
+    }
+}
+
+/// Which optional toolbar items are shown, given the free width between the left-hand group
+/// and the zoom sliders. Logic hides toolbar items that do not fit; most useful first: Snap,
+/// Drag, the two tool menus, then the waveform zoom buttons.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct ToolbarFit {
+    snap: bool,
+    drag: bool,
+    tools: bool,
+    wave: bool,
+}
+
+/// Widths (with their labels and gaps) of the optional toolbar items.
+const SNAP_W: f32 = 204.0;
+const DRAG_W: f32 = 160.0;
+const TOOLS_W: f32 = 92.0;
+const WAVE_W: f32 = 62.0;
+
+fn fit_toolbar(free: f32) -> ToolbarFit {
+    let mut left = free;
+    let mut take = |w: f32| {
+        let fits = left >= w;
+        if fits {
+            left -= w;
+        }
+        fits
+    };
+    let snap = take(SNAP_W);
+    let drag = take(DRAG_W);
+    let tools = take(TOOLS_W);
+    let wave = take(WAVE_W);
+    ToolbarFit {
+        snap,
+        drag,
+        tools,
+        wave,
+    }
+}
+
+/// "Drag:" mode menu ending at `rx`; returns where the next item to its left ends.
+fn drag_menu(ui: &Ui, g: &Painter, v: &mut TracksView, rx: f32, cy: f32) -> f32 {
     let drag_r = Rect::from_min_size(pos2(rx - 110.0, cy - 10.0), vec2(110.0, 20.0));
-    let resp = popup_button(ui, &g, drag_r, id(("popup", "drag")), v.drag_mode.label());
+    let resp = popup_button(ui, g, drag_r, id(("popup", "drag")), v.drag_mode.label());
     egui::Popup::menu(&resp).show(|ui| {
         for m in DragMode::ALL {
             if ui.selectable_label(v.drag_mode == m, m.label()).clicked() {
@@ -577,10 +646,13 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
         FontId::proportional(12.5),
         TEXT_DIM,
     );
-    rx = drag_r.left() - 50.0;
+    drag_r.left() - 50.0
+}
 
+/// "Snap:" menu ending at `rx`; returns where the next item to its left ends.
+fn snap_menu(ui: &Ui, g: &Painter, v: &mut TracksView, rx: f32, cy: f32) -> f32 {
     let snap_r = Rect::from_min_size(pos2(rx - 150.0, cy - 10.0), vec2(150.0, 20.0));
-    let resp = popup_button(ui, &g, snap_r, id(("popup", "snap")), v.snap.label());
+    let resp = popup_button(ui, g, snap_r, id(("popup", "snap")), v.snap.label());
     egui::Popup::menu(&resp).show(|ui| {
         for m in Snap::ALL {
             if ui.selectable_label(v.snap == m, m.label()).clicked() {
@@ -596,9 +668,11 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
         FontId::proportional(12.5),
         TEXT_DIM,
     );
-    rx = snap_r.left() - 54.0;
+    snap_r.left() - 54.0
+}
 
-    // Left-click and Command-click tools (only the Pointer works so far).
+/// Left-click and Command-click tool menus ending at `rx` (only the Pointer works so far).
+fn tool_menus(ui: &Ui, g: &Painter, rx: f32, cy: f32) {
     for (i, key) in ["tool_l", "tool_r"].iter().enumerate() {
         let r = Rect::from_min_size(
             pos2(rx - 40.0 - (1 - i) as f32 * 44.0, cy - 10.0),
@@ -610,9 +684,9 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
         }
         let icon_at = pos2(r.left() + 13.0, cy);
         if i == 0 {
-            draw_pointer(&g, icon_at, TEXT);
+            draw_pointer(g, icon_at, TEXT);
         } else {
-            draw_crosshair(&g, icon_at, TEXT);
+            draw_crosshair(g, icon_at, TEXT);
         }
         let c = pos2(r.right() - 9.0, cy + 1.0);
         g.add(Shape::line(
@@ -636,9 +710,193 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
     }
 }
 
+// ------------------------------------------------------------------ right-click menus
+
+/// An entry picked in one of the Tracks area's right-click menus; run once the menus are drawn.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum CtxAction {
+    NewTrack(TrackKind),
+    ZoomToFit,
+    OpenPianoRoll,
+    ToggleRegionMute(usize, usize),
+    RepeatRegion,
+    LocatorsByRegion,
+    DeleteRegion,
+    CreateStack(usize),
+    ReleaseStack(usize),
+    ToggleMute(usize),
+    ToggleSolo(usize),
+    ResetHeight(usize),
+    DeleteTrack(usize),
+}
+
+/// What the track menu needs to know about the track that was right-clicked.
+struct TrackInfo {
+    i: usize,
+    folder: bool,
+    mute: bool,
+    solo: bool,
+    custom_height: bool,
+    last: bool,
+}
+
+fn pick(ui: &mut Ui, label: &str, key: &str, action: CtxAction, picked: &mut Option<CtxAction>) {
+    if ui
+        .add(egui::Button::new(label).shortcut_text(key))
+        .clicked()
+    {
+        *picked = Some(action);
+    }
+}
+
+fn new_track_items(ui: &mut Ui, picked: &mut Option<CtxAction>) {
+    for (label, kind) in [
+        ("New Software Instrument Track", TrackKind::Instrument),
+        ("New Audio Track", TrackKind::Audio),
+        ("New Aux Track", TrackKind::Aux),
+    ] {
+        pick(ui, label, "", CtxAction::NewTrack(kind), picked);
+    }
+}
+
+fn region_items(
+    ui: &mut Ui,
+    is_audio: bool,
+    muted: bool,
+    ti: usize,
+    ri: usize,
+    picked: &mut Option<CtxAction>,
+) {
+    if !is_audio {
+        pick(
+            ui,
+            "Open in Piano Roll",
+            "",
+            CtxAction::OpenPianoRoll,
+            picked,
+        );
+        ui.separator();
+    }
+    let mute = if muted {
+        "Unmute Region"
+    } else {
+        "Mute Region"
+    };
+    pick(ui, mute, "", CtxAction::ToggleRegionMute(ti, ri), picked);
+    let repeat_key = ui
+        .ctx()
+        .format_shortcut(&egui::KeyboardShortcut::new(Modifiers::COMMAND, Key::R));
+    pick(
+        ui,
+        "Repeat Region",
+        &repeat_key,
+        CtxAction::RepeatRegion,
+        picked,
+    );
+    pick(
+        ui,
+        "Set Locators by Region",
+        "",
+        CtxAction::LocatorsByRegion,
+        picked,
+    );
+    ui.separator();
+    pick(ui, "Delete", "⌫", CtxAction::DeleteRegion, picked);
+}
+
+fn track_items(ui: &mut Ui, t: &TrackInfo, picked: &mut Option<CtxAction>) {
+    new_track_items(ui, picked);
+    ui.separator();
+    pick(
+        ui,
+        "Create Track Stack",
+        "",
+        CtxAction::CreateStack(t.i),
+        picked,
+    );
+    if t.folder {
+        pick(
+            ui,
+            "Release Track Stack",
+            "",
+            CtxAction::ReleaseStack(t.i),
+            picked,
+        );
+    }
+    ui.separator();
+    let mute = if t.mute { "Unmute Track" } else { "Mute Track" };
+    pick(ui, mute, "", CtxAction::ToggleMute(t.i), picked);
+    let solo = if t.solo { "Unsolo Track" } else { "Solo Track" };
+    pick(ui, solo, "", CtxAction::ToggleSolo(t.i), picked);
+    if t.custom_height {
+        pick(
+            ui,
+            "Reset Track Height",
+            "",
+            CtxAction::ResetHeight(t.i),
+            picked,
+        );
+    }
+    ui.separator();
+    let delete = ui.add_enabled(!t.last, egui::Button::new("Delete Track"));
+    if delete.clicked() {
+        *picked = Some(CtxAction::DeleteTrack(t.i));
+    }
+}
+
+/// Runs a right-click menu entry.
+fn apply_ctx(action: CtxAction, p: &mut Project, s: &mut UiState, lanes_w: f32) {
+    let v = &mut s.tracks;
+    match action {
+        CtxAction::NewTrack(kind) => {
+            p.add_track(kind);
+        }
+        CtxAction::ZoomToFit => zoom_to_fit(p, v, lanes_w),
+        CtxAction::OpenPianoRoll => s.bottom = Bottom::PianoRoll,
+        CtxAction::ToggleRegionMute(t, r) => {
+            if let Some(region) = p.tracks.get_mut(t).and_then(|t| t.regions.get_mut(r)) {
+                region.params.mute = !region.params.mute;
+                p.song_rev += 1;
+            }
+        }
+        CtxAction::RepeatRegion => repeat_selected(p, v),
+        CtxAction::LocatorsByRegion => set_locators_by_region(p, v),
+        CtxAction::DeleteRegion => delete_selected(p, v),
+        CtxAction::CreateStack(i) => {
+            p.create_track_stack(i);
+            forget_track_indexes(s);
+        }
+        CtxAction::ReleaseStack(i) => {
+            if p.release_track_stack(i) {
+                forget_track_indexes(s);
+            }
+        }
+        CtxAction::ToggleMute(i) => {
+            let mute = !p.tracks[i].mute;
+            p.set_folder_flags(i, Some(mute), None);
+        }
+        CtxAction::ToggleSolo(i) => {
+            let solo = !p.tracks[i].solo;
+            p.set_folder_flags(i, None, Some(solo));
+        }
+        CtxAction::ResetHeight(i) => p.tracks[i].height = 1.0,
+        CtxAction::DeleteTrack(i) => {
+            if p.delete_track(i) {
+                forget_track_indexes(s);
+            }
+        }
+    }
+}
+
+/// Track numbers shifted, so a remembered region or note selection may point at another track.
+fn forget_track_indexes(s: &mut UiState) {
+    s.tracks.selected = None;
+    s.piano.selected.clear();
+}
+
 // ------------------------------------------------------------------ actions
 
-fn delete_selected(p: &mut Project, v: &mut TracksView) {
+pub(crate) fn delete_selected(p: &mut Project, v: &mut TracksView) {
     if let Some((t, r)) = v.selected.take() {
         if let Some(track) = p.tracks.get_mut(t) {
             if r < track.regions.len() {
@@ -677,7 +935,7 @@ fn set_locators_by_region(p: &mut Project, v: &TracksView) {
     p.cycle = true;
 }
 
-fn zoom_to_fit(p: &Project, v: &mut TracksView, lanes_w: f32) {
+pub(crate) fn zoom_to_fit(p: &Project, v: &mut TracksView, lanes_w: f32) {
     let end = p
         .tracks
         .iter()
@@ -899,7 +1157,9 @@ fn folder_buttons(ui: &Ui, g: &Painter, p: &mut Project, i: usize, x: f32, y: f3
     }
 }
 
-fn header(ui: &Ui, g: &Painter, p: &mut Project, i: usize, hdr: Rect) {
+/// Draws track `i`'s header and returns the response of its background (for the right-click
+/// menu; the buttons on it handle their own clicks).
+fn header(ui: &Ui, g: &Painter, p: &mut Project, i: usize, hdr: Rect) -> egui::Response {
     let selected = p.selected_track == i;
     g.rect_filled(hdr, 0.0, if selected { HEADER_SEL } else { HEADER_BG });
     g.line_segment(
@@ -914,7 +1174,8 @@ fn header(ui: &Ui, g: &Painter, p: &mut Project, i: usize, hdr: Rect) {
         FontId::proportional(12.0),
         TEXT_DIM,
     );
-    if ui.interact(hdr, id(("hdr", i)), Sense::click()).clicked() {
+    let resp = ui.interact(hdr, id(("hdr", i)), Sense::click());
+    if resp.clicked() || context_click(&resp) {
         p.selected_track = i;
     }
 
@@ -967,7 +1228,7 @@ fn header(ui: &Ui, g: &Painter, p: &mut Project, i: usize, hdr: Rect) {
         if !compact {
             folder_buttons(ui, g, p, i, name_x, hdr.center().y + 3.0, selected);
         }
-        return;
+        return resp;
     }
 
     // M S R (I) buttons under the name (compact tracks: hidden, like Logic at small heights).
@@ -1070,6 +1331,7 @@ fn header(ui: &Ui, g: &Painter, p: &mut Project, i: usize, hdr: Rect) {
         t.pan = 0.0;
     }
     crate::widgets::draw_knob(g, kc, 9.0, t.pan);
+    resp
 }
 
 // ------------------------------------------------------------------ main view
@@ -1098,6 +1360,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let bpb = p.beats_per_bar();
     let unit = p.beat_unit();
     let v = &mut s.tracks;
+    v.lanes_w = lanes.width();
 
     // ---- wheel: scroll; Shift = horizontal; Ctrl/Cmd = horizontal zoom around the pointer
     let hover = ui.input(|i| i.pointer.hover_pos());
@@ -1175,7 +1438,8 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
 
     // Click on an empty lane: select that track, deselect regions.
     let lane_resp = ui.interact(lanes, id("lanes"), Sense::click());
-    if lane_resp.clicked() {
+    let mut picked: Option<CtxAction> = None;
+    if lane_resp.clicked() || context_click(&lane_resp) {
         if let Some(pt) = lane_resp.interact_pointer_pos() {
             if let Some(row) = row_at(&rows, pt.y - lanes.top() + scroll_y) {
                 p.selected_track = row;
@@ -1183,6 +1447,13 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         }
         v.selected = None;
     }
+    context_menu(&lane_resp, |ui| {
+        new_track_items(ui, &mut picked);
+        ui.separator();
+        if ui.button("Zoom to Fit").clicked() {
+            picked = Some(CtxAction::ZoomToFit);
+        }
+    });
 
     // ---- regions
     let step = snap_step(v.snap, beat_px, bpb, unit);
@@ -1207,7 +1478,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
                 continue;
             }
             let resp = ui.interact(rr, id(("region", ti, ri)), Sense::click_and_drag());
-            if resp.clicked() || resp.drag_started() {
+            if resp.clicked() || resp.drag_started() || context_click(&resp) {
                 v.selected = Some((ti, ri));
                 p.selected_track = ti;
             }
@@ -1228,6 +1499,13 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             if resp.drag_stopped() {
                 moved = true;
             }
+            let (is_audio, muted) = (
+                p.tracks[ti].kind == TrackKind::Audio,
+                p.tracks[ti].regions[ri].params.mute,
+            );
+            context_menu(&resp, |ui| {
+                region_items(ui, is_audio, muted, ti, ri, &mut picked);
+            });
             let selected = v.selected == Some((ti, ri));
             let tr = &p.tracks[ti];
             draw_region(
@@ -1275,8 +1553,22 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             continue;
         }
         let hdr = Rect::from_min_size(pos2(headers.left(), y), vec2(HEADER_W, row_h));
-        header(ui, &gh, p, i, hdr);
+        let resp = header(ui, &gh, p, i, hdr);
+        let t = &p.tracks[i];
+        let info = TrackInfo {
+            i,
+            folder: t.kind == TrackKind::Folder,
+            mute: t.mute,
+            solo: t.solo,
+            custom_height: t.height != 1.0,
+            last: p.tracks.len() == 1,
+        };
+        context_menu(&resp, |ui| track_items(ui, &info, &mut picked));
     }
+    if let Some(action) = picked {
+        apply_ctx(action, p, s, lanes.width());
+    }
+    let v = &mut s.tracks;
 
     // ---- individual track height: drag the lower edge of a track (header or lane), as in
     // Logic. Registered after headers and regions so the edge wins over them.
@@ -1537,6 +1829,31 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
 #[cfg(test)]
 mod row_tests {
     use super::*;
+
+    #[test]
+    fn the_toolbar_drops_its_least_used_items_first_when_narrow() {
+        let all = SNAP_W + DRAG_W + TOOLS_W + WAVE_W;
+        let f = fit_toolbar(all);
+        assert!(f.snap && f.drag && f.tools && f.wave);
+        let f = fit_toolbar(all - 1.0);
+        assert!(
+            f.snap && f.drag && f.tools && !f.wave,
+            "waveform buttons go first"
+        );
+        let f = fit_toolbar(SNAP_W + DRAG_W);
+        assert!(f.snap && f.drag && !f.tools && !f.wave);
+        let f = fit_toolbar(SNAP_W);
+        assert!(f.snap && !f.drag);
+        assert_eq!(
+            fit_toolbar(-50.0),
+            ToolbarFit {
+                snap: false,
+                drag: false,
+                tools: false,
+                wave: false
+            }
+        );
+    }
 
     #[test]
     fn fake_waveforms_are_tied_to_the_region_not_the_screen() {

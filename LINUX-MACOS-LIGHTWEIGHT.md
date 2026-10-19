@@ -107,9 +107,21 @@ mod alsa_host;
 
 ## 6. Lightness Tests (for QA)
 
-- `cargo xtask bench -- --bench startup` — deve ser <400ms cold start
-- `cargo xtask bench -- --bench ram-idle` — <150MB RSS com 0 tracks
-- `cargo xtask bench -- --bench 24-tracks` — 24 tracks 48k/24-bit, CPU <15% no M1 Pro / i7-12700, RAM <300MB
+`cargo xtask bench` builds the release app, runs `prowave --bench <file>` and checks:
+
+- release binary under 50 MB
+- start to first frame under 400 ms
+- memory with an empty project, idle, under 150 MB
+- 24 software-instrument tracks at 48 kHz rendered by the engine in under 15 % of one CPU core,
+  and memory under 300 MB
+
+CI runs it on macOS and Windows on every push (`.github/workflows/ci.yml`, job `bench`). On
+Windows the first run (2026-10-20, 4K display) gave 12.6 MB, 314 ms, 125 MB, 3.6 % and 125 MB.
+What made the difference was the graphics API: OpenGL alone instead of starting Vulkan,
+DirectX 12 and OpenGL together (`crates/prowave-app/src/graphics.rs`).
+
+`prowave --layout-shots <folder>` saves pictures of the window at 1920x1080, 1470x920 (13-inch
+MacBook Air), 1280x800 and 1024x700, to check that nothing overlaps on small screens.
 - Compare with Logic Pro: same 24-track project in Logic = 1.2GB RAM, ProWave = 300MB
 
 ---

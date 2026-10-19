@@ -331,6 +331,8 @@ impl App {
         self.path = path;
         self.saved = content(&self.project);
         self.ui.reset_views();
+        // Undo stays within one project.
+        self.history.reset(&self.project);
         // A project is open now, so the Project Chooser has done its job.
         self.ui.chooser = None;
     }
@@ -345,11 +347,15 @@ mod tests {
         let project = Project::demo();
         App {
             saved: content(&project),
+            history: crate::undo::History::new(&project),
             project,
             ui: crate::UiState::new(),
             sync: None,
             path: None,
             native_menu: None,
+            bench: None,
+            shots: None,
+            frames_since_record: 0,
         }
     }
 

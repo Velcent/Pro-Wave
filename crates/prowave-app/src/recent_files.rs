@@ -12,7 +12,7 @@ fn default_file() -> Option<PathBuf> {
 
 /// `<config folder>/prowave`: %APPDATA% on Windows, ~/Library/Application Support on macOS,
 /// $XDG_CONFIG_HOME or ~/.config elsewhere. `None` when no home folder is known.
-fn config_dir() -> Option<PathBuf> {
+pub(crate) fn config_dir() -> Option<PathBuf> {
     let var = |name: &str| {
         std::env::var_os(name)
             .filter(|v| !v.is_empty())

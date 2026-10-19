@@ -1,9 +1,10 @@
 //! Top menu bar with the same menus and entries as Logic Pro. Each entry is drawn like a macOS
 //! menu item: check-mark column, title, key command on the right; entries that do not apply
-//! are greyed out. The Smart Controls button in the control bar switches the bar and its
+//! now, or are not implemented yet, are greyed out (see [`enabled`]). The Smart Controls button in the control bar switches the bar and its
 //! menus between the dark look and the light (white) macOS look (`UiState::light_menus`).
 use crate::file_commands::FileCmd;
 use crate::model::{Project, TrackKind};
+use crate::undo::UndoCmd;
 use crate::Bottom;
 use egui::{pos2, vec2, Align2, Color32, FontId, Key, KeyboardShortcut, Modifiers, Sense, Stroke};
 
@@ -152,6 +153,10 @@ const VIEW: &[&str] = &[
     "Show Grid",
     "Show Smart Tempo",
     "-",
+    "Bigger Interface",
+    "Smaller Interface",
+    "Actual Interface Size",
+    "-",
     "Enter Full Screen",
 ];
 const WINDOW: &[&str] = &[
@@ -183,9 +188,6 @@ pub(crate) const MENUS: [(&str, &[&str]); 9] = [
     ("Window", WINDOW),
     ("Help", HELP),
 ];
-
-/// View entries Logic greys out while there is nothing to act on.
-pub(crate) const GREYED: &[&str] = &["Create Track Automation", "Convert Automation"];
 
 /// Entries that can show a check mark (see [`checked`]).
 pub(crate) const CHECKABLE: &[&str] = &[
@@ -257,6 +259,26 @@ fn shortcut(label: &str) -> Option<KeyboardShortcut> {
     if let Some(cmd) = FileCmd::from_menu(label) {
         return cmd.shortcut();
     }
+    match label {
+        "Undo" => return Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::Z)),
+        "Redo" => {
+            return Some(KeyboardShortcut::new(
+                Modifiers::COMMAND | Modifiers::SHIFT,
+                Key::Z,
+            ))
+        }
+        "Delete" => return Some(KeyboardShortcut::new(Modifiers::NONE, Key::Delete)),
+        _ => {}
+    }
+    let interface_key = match label {
+        "Bigger Interface" => Some(Key::Equals),
+        "Smaller Interface" => Some(Key::Minus),
+        "Actual Interface Size" => Some(Key::Num0),
+        _ => None,
+    };
+    if let Some(key) = interface_key {
+        return Some(KeyboardShortcut::new(Modifiers::COMMAND, key));
+    }
     let key = match label {
         "Show Library" => Key::Y,
         "Show Inspector" => Key::I,
@@ -264,6 +286,63 @@ fn shortcut(label: &str) -> Option<KeyboardShortcut> {
         _ => return None,
     };
     Some(KeyboardShortcut::new(Modifiers::NONE, key))
+}
+
+/// Whether `label` can be chosen now. Entries that are not implemented yet are greyed out,
+/// so a click never silently does nothing; others are greyed while there is nothing to act on.
+pub(crate) fn enabled(label: &str, p: &Project, s: &crate::UiState) -> bool {
+    if FileCmd::from_menu(label).is_some() {
+        return true;
+    }
+    match label {
+        "Undo" => s.can_undo,
+        "Redo" => s.can_redo,
+        "Delete Undo History" => s.can_undo || s.can_redo,
+        "Delete" | "Deselect All" => s.tracks.selected.is_some(),
+        "Delete Track" => p.tracks.len() > 1,
+        "Release Track Stack" => p
+            .tracks
+            .get(p.selected_track)
+            .is_some_and(|t| t.kind == TrackKind::Folder),
+        "Go to Next Region" | "Go to Previous Region" => {
+            p.tracks.iter().any(|t| !t.regions.is_empty())
+        }
+        "New from Template…"
+        | "New"
+        | "New Aux Track"
+        | "Create Track Stack…"
+        | "Go to Beginning"
+        | "Go to End"
+        | "Go to Left Locator"
+        | "Go to Right Locator"
+        | "Zoom to Fit"
+        | "Zoom In"
+        | "Zoom Out"
+        | "Record"
+        | "Show Piano Roll"
+        | "Show Mixer"
+        | "Show Library"
+        | "Show Inspector"
+        | "Mixer"
+        | "Piano Roll"
+        | "Bigger Interface"
+        | "Smaller Interface"
+        | "Actual Interface Size" => true,
+        _ => false,
+    }
+}
+
+/// Start of every region, in beats, sorted (for Go to Next / Previous Region).
+fn region_starts(p: &Project) -> Vec<f64> {
+    let bpb = p.beats_per_bar();
+    let mut starts: Vec<f64> = p
+        .tracks
+        .iter()
+        .flat_map(|t| t.regions.iter())
+        .map(|r| (r.start_bar as f64 - 1.0) * bpb)
+        .collect();
+    starts.sort_by(f64::total_cmp);
+    starts
 }
 
 /// Whether `label` shows a check mark (what it shows is visible).
@@ -302,12 +381,64 @@ pub(crate) fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
             }
         }
         "New from Template…" => s.chooser = Some(crate::start_screen::Chooser::templates()),
+        // Track > New: a software instrument track, as the + button above the tracks adds.
+        "New" => {
+            p.add_track(TrackKind::Instrument);
+        }
         "New Aux Track" => {
             p.add_track(TrackKind::Aux);
+        }
+        "Undo" => s.undo_cmd = Some(UndoCmd::Undo),
+        "Redo" => s.undo_cmd = Some(UndoCmd::Redo),
+        "Delete Undo History" => s.undo_cmd = Some(UndoCmd::Clear),
+        "Delete" => crate::tracks_area::delete_selected(p, &mut s.tracks),
+        "Deselect All" => s.tracks.selected = None,
+        "Go to End" => {
+            let bpb = p.beats_per_bar();
+            p.position_beats = p
+                .tracks
+                .iter()
+                .flat_map(|t| t.regions.iter())
+                .map(|r| (r.start_bar + r.len_bars - 1.0) as f64 * bpb)
+                .fold(0.0, f64::max);
+        }
+        "Go to Left Locator" => p.position_beats = p.cycle_start,
+        "Go to Right Locator" => p.position_beats = p.cycle_end,
+        "Go to Next Region" => {
+            let at = p.position_beats + 1e-6;
+            if let Some(b) = region_starts(p).into_iter().find(|b| *b > at) {
+                p.position_beats = b;
+            }
+        }
+        "Go to Previous Region" => {
+            let at = p.position_beats - 1e-6;
+            if let Some(b) = region_starts(p).into_iter().rev().find(|b| *b < at) {
+                p.position_beats = b;
+            }
+        }
+        "Zoom In" => s.tracks.bar_w = (s.tracks.bar_w * 1.25).min(600.0),
+        "Zoom Out" => s.tracks.bar_w = (s.tracks.bar_w / 1.25).max(6.0),
+        "Zoom to Fit" => {
+            let w = s.tracks.lanes_w;
+            crate::tracks_area::zoom_to_fit(p, &mut s.tracks, w);
         }
         "Create Track Stack…" => {
             p.create_track_stack(p.selected_track);
             forget_region_selection(s);
+        }
+        "Bigger Interface" | "Smaller Interface" | "Actual Interface Size" => {
+            let dir = match label {
+                "Bigger Interface" => 1,
+                "Smaller Interface" => -1,
+                _ => 0,
+            };
+            s.ui_scale = crate::ui_scale::step(s.ui_scale, dir);
+            crate::ui_scale::save(s.ui_scale);
+        }
+        "Delete Track" => {
+            if p.delete_track(p.selected_track) {
+                forget_region_selection(s);
+            }
         }
         "Release Track Stack" => {
             if p.release_track_stack(p.selected_track) {
@@ -324,9 +455,9 @@ pub(crate) fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
     }
 }
 
-/// One menu entry: check column, title, key command. Returns true when chosen.
+/// One menu entry that is always enabled (the Open Recent list).
 fn item(ui: &mut egui::Ui, label: &str, check: bool, key: Option<String>, look: &Look) -> bool {
-    item_with(ui, label, !GREYED.contains(&label), check, key, look)
+    item_with(ui, label, true, check, key, look)
 }
 
 /// Like [`item`], with the greyed-out state given by the caller.
@@ -442,7 +573,7 @@ fn menu(ui: &mut egui::Ui, title: &str, items: &[&str], p: &mut Project, s: &mut
                 continue;
             }
             let key = shortcut(it).map(|k| ui.ctx().format_shortcut(&k));
-            if item(ui, it, checked(it, s), key, look) {
+            if item_with(ui, it, enabled(it, p, s), checked(it, s), key, look) {
                 apply(it, p, s);
                 ui.close();
             }
@@ -487,9 +618,38 @@ pub fn handle_keys(ctx: &egui::Context, p: &mut Project, s: &mut crate::UiState)
             }
         }
     }
+    // Redo first: matching Cmd+Z ignores an extra Shift. Ctrl+Y is Redo on Windows and Linux.
+    let redo = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+    let redo_y = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
+    let undo = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
+    if ctx.input_mut(|i| i.consume_shortcut(&redo))
+        || (!cfg!(target_os = "macos") && ctx.input_mut(|i| i.consume_shortcut(&redo_y)))
+    {
+        s.undo_cmd = Some(UndoCmd::Redo);
+    } else if ctx.input_mut(|i| i.consume_shortcut(&undo)) {
+        s.undo_cmd = Some(UndoCmd::Undo);
+    }
+    // Cmd/Ctrl + = also comes as Plus on keyboards where = needs no Shift.
+    let bigger = KeyboardShortcut::new(Modifiers::COMMAND, Key::Plus);
+    if ctx.input_mut(|i| i.consume_shortcut(&bigger)) {
+        apply("Bigger Interface", p, s);
+    }
+    for label in [
+        "Bigger Interface",
+        "Smaller Interface",
+        "Actual Interface Size",
+    ] {
+        if let Some(k) = shortcut(label) {
+            if ctx.input_mut(|i| i.consume_shortcut(&k)) {
+                apply(label, p, s);
+            }
+        }
+    }
 }
 
-pub fn menu_bar(ui: &mut egui::Ui, p: &mut Project, s: &mut crate::UiState) {
+/// The menu bar. Returns where its contents end, so the rest of the row can be used (on Linux
+/// it holds the window buttons and moves the window, see `window_chrome`).
+pub fn menu_bar(ui: &mut egui::Ui, p: &mut Project, s: &mut crate::UiState) -> f32 {
     let light = s.light_menus;
     let bar = egui::MenuBar::new()
         .style(menu_style(light))
@@ -504,7 +664,14 @@ pub fn menu_bar(ui: &mut egui::Ui, p: &mut Project, s: &mut crate::UiState) {
             menu(ui, title, items, p, s);
         }
         status_line(ui, p, s);
-    });
+        ui.cursor().left()
+    })
+    .inner
+}
+
+/// Colour of the menu bar's text, for things drawn on the bar.
+pub fn bar_text(light: bool) -> Color32 {
+    look(light).bar_text
 }
 
 /// Whether [`status_line`] has anything to say.
@@ -534,6 +701,24 @@ pub fn status_line(ui: &mut egui::Ui, p: &Project, s: &crate::UiState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_commands::content;
+
+    /// Everything a menu entry can change, to compare before and after.
+    fn state(p: &Project, s: &crate::UiState) -> String {
+        format!(
+            "{:?}",
+            (
+                content(p) == content(&Project::demo()),
+                p.tracks.len(),
+                p.position_beats,
+                p.recording,
+                (s.show_mixer, s.show_library, s.show_inspector),
+                s.bottom == Bottom::Mixer,
+                (s.file_cmd, s.chooser.is_some(), s.undo_cmd),
+                (s.ui_scale, s.tracks.bar_w, s.tracks.selected),
+            )
+        )
+    }
 
     #[test]
     fn view_menu_checks_follow_the_panels() {
@@ -554,7 +739,6 @@ mod tests {
         apply("Save As…", &mut Project::demo(), &mut s);
         assert_eq!(s.file_cmd, Some(FileCmd::SaveAs));
         assert!(shortcut("Show Library").is_some() && shortcut("Bounce").is_none());
-        assert!(GREYED.iter().all(|g| VIEW.contains(g)));
 
         for (label, cmd) in [
             ("Save A Copy As…", FileCmd::SaveCopy),
@@ -564,6 +748,78 @@ mod tests {
             apply(label, &mut Project::demo(), &mut s);
             assert_eq!(s.file_cmd.take(), Some(cmd));
         }
+    }
+
+    #[test]
+    fn every_enabled_entry_does_something() {
+        // An entry that is enabled must be handled by `apply` (or open a file command):
+        // a click must never silently do nothing.
+        let (p, mut s) = (Project::demo(), crate::UiState::new());
+        s.can_undo = true;
+        s.can_redo = true;
+        s.tracks.selected = Some((0, 0));
+        for (_, items) in MENUS {
+            for label in items.iter().filter(|l| **l != "-" && **l != "Open Recent") {
+                if !enabled(label, &p, &s) {
+                    continue;
+                }
+                let (mut p2, mut s2) = (Project::demo(), crate::UiState::new());
+                s2.tracks.selected = Some((0, 0));
+                let before = state(&p2, &s2);
+                apply(label, &mut p2, &mut s2);
+                // These two may already be where they would take you.
+                let may_stay = ["Go to Next Region", "Actual Interface Size"].contains(label);
+                assert!(
+                    before != state(&p2, &s2) || may_stay,
+                    "{label} is enabled but does nothing"
+                );
+            }
+        }
+        // And unimplemented ones are greyed, like the ones from the GitHub report.
+        for label in [
+            "Cut",
+            "Copy",
+            "Paste",
+            "Close",
+            "Export",
+            "Stem Splitter…",
+            "Join",
+        ] {
+            assert!(!enabled(label, &p, &s), "{label}");
+        }
+    }
+
+    #[test]
+    fn track_new_adds_an_instrument_track() {
+        let (mut p, mut s) = (Project::demo(), crate::UiState::new());
+        let n = p.tracks.len();
+        apply("New", &mut p, &mut s);
+        assert_eq!(p.tracks.len(), n + 1);
+        assert_eq!(p.tracks[n].kind, TrackKind::Instrument);
+    }
+
+    #[test]
+    fn undo_entries_follow_the_history_and_queue_their_command() {
+        let (p, mut s) = (Project::demo(), crate::UiState::new());
+        assert!(!enabled("Undo", &p, &s) && !enabled("Redo", &p, &s));
+        s.can_undo = true;
+        assert!(enabled("Undo", &p, &s) && enabled("Delete Undo History", &p, &s));
+        apply("Undo", &mut Project::demo(), &mut s);
+        assert_eq!(s.undo_cmd, Some(UndoCmd::Undo));
+    }
+
+    #[test]
+    fn region_navigation_jumps_between_region_starts() {
+        let (mut p, mut s) = (Project::demo(), crate::UiState::new());
+        p.position_beats = 0.0;
+        apply("Go to End", &mut p, &mut s);
+        assert_eq!(
+            p.position_beats,
+            12.0 * 4.0,
+            "the demo's regions end at bar 13"
+        );
+        apply("Go to Previous Region", &mut p, &mut s);
+        assert_eq!(p.position_beats, 0.0);
     }
 
     #[test]

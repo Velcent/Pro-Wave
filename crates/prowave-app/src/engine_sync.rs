@@ -146,6 +146,23 @@ fn build_song(engine: &Engine, p: &Project) -> Song {
     Song::new(notes, tracks).with_clips(clips)
 }
 
+/// The project's MIDI as an engine song, without audio regions (which need a running
+/// `Engine` to stream). Used by the offline benchmark.
+pub fn offline_song(p: &Project) -> Song {
+    let tracks = p
+        .tracks
+        .iter()
+        .take(MAX_TRACKS)
+        .map(|t| TrackMix {
+            gain_db: t.volume_db,
+            mute: t.mute,
+            solo: t.solo,
+            pan: t.pan,
+        })
+        .collect();
+    Song::new(song_notes(p), tracks)
+}
+
 /// The project's tempo and time signature as an engine tempo map.
 fn tempo_map(p: &Project) -> Command {
     Command::SetTempoMap(Box::new(TempoMap::constant(p.tempo, p.sig)))

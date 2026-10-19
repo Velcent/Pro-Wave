@@ -167,6 +167,7 @@ impl Track {
     }
 }
 
+#[derive(Clone)]
 pub struct Project {
     pub name: String,
     pub tempo: f32,
@@ -495,6 +496,26 @@ impl Project {
         true
     }
 
+    /// Track > Delete Track: removes track `i` with its regions. Deleting a folder keeps the
+    /// tracks inside it (as Release Track Stack does). The last track cannot be deleted, so
+    /// there is always a selected track; returns false then and when `i` does not exist.
+    pub fn delete_track(&mut self, i: usize) -> bool {
+        if i >= self.tracks.len() || self.tracks.len() == 1 {
+            return false;
+        }
+        if self.tracks[i].kind == TrackKind::Folder {
+            return self.release_track_stack(i);
+        }
+        self.tracks.remove(i);
+        if self.selected_track > i {
+            self.selected_track -= 1;
+        }
+        self.selected_track = self.selected_track.min(self.tracks.len() - 1);
+        self.normalize_nesting();
+        self.song_rev += 1;
+        true
+    }
+
     /// Sets Mute and/or Solo on folder `i` and on every track inside it, as a folder's M and S
     /// buttons do.
     pub fn set_folder_flags(&mut self, i: usize, mute: Option<bool>, solo: Option<bool>) {
@@ -645,6 +666,34 @@ mod tests {
             );
         }
         assert!(TrackKind::Audio.has_regions() && TrackKind::Drummer.has_regions());
+    }
+
+    #[test]
+    fn deleting_tracks_keeps_the_selection_valid_and_never_empties_the_project() {
+        let mut p = Project::demo();
+        let n = p.tracks.len();
+        p.selected_track = n - 1;
+        let rev = p.song_rev;
+        assert!(p.delete_track(1));
+        assert_eq!(p.tracks.len(), n - 1);
+        assert_eq!(p.selected_track, n - 2, "the selection follows its track");
+        assert_ne!(p.song_rev, rev);
+        assert!(!p.delete_track(99));
+
+        // A folder goes, the tracks inside it stay.
+        let stacked = p.tracks[0].name.clone();
+        p.create_track_stack(0);
+        assert!(p.delete_track(0));
+        assert_eq!(
+            (p.tracks[0].name.as_str(), p.tracks[0].indent),
+            (stacked.as_str(), 0)
+        );
+
+        while p.tracks.len() > 1 {
+            assert!(p.delete_track(0));
+        }
+        assert!(!p.delete_track(0), "the last track stays");
+        assert_eq!(p.selected_track, 0);
     }
 
     #[test]

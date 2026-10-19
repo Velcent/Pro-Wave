@@ -4,6 +4,10 @@
 //!   cargo-deny, wasm-check, and the preset/wasm suites once their crates exist
 //! - `wasm-check`: `cargo check --target wasm32-unknown-unknown` for the wasm-portable crates
 //! - `rt-check`: the no-allocation tests for the audio thread (debug build, assert_no_alloc)
+//! - `bench`: release build checked against the lightweight targets (startup, memory, binary
+//!   size, 24-track DSP load); see bench.rs
+mod bench;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -241,8 +245,9 @@ fn main() -> ExitCode {
         "check" => check(),
         "wasm-check" => wasm_steps().iter().all(run),
         "rt-check" => run(&rt_step()),
+        "bench" => bench::bench(&root()),
         _ => {
-            eprintln!("usage: cargo xtask <check|wasm-check|rt-check>");
+            eprintln!("usage: cargo xtask <check|wasm-check|rt-check|bench>");
             false
         }
     };

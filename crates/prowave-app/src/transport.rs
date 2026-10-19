@@ -886,11 +886,12 @@ pub fn control_bar(
     }
 
     // Right: master volume, then List Editors / Note Pads / Loop Browser / Browsers.
-    let vol = Rect::from_min_size(
-        pos2(bar.right() - 188.0 - 140.0, cy - 11.0),
-        vec2(140.0, 22.0),
-    );
-    master_volume(ui, &g, p, vol, master_peaks);
+    // The volume sits after the metronome and before the icons, narrower if it must be.
+    let (vol_left, vol_w) = volume_span(rx(156.0).x, bar.right());
+    if vol_w > 0.0 {
+        let vol = Rect::from_min_size(pos2(vol_left, cy - 11.0), vec2(vol_w, 22.0));
+        master_volume(ui, &g, p, vol, master_peaks);
+    }
     let right: [IconFn; 4] = [icon_list_editors, icon_note_pad, icon_loops, icon_browsers];
     for (i, draw) in right.iter().enumerate() {
         let c = pos2(bar.right() - 106.0 + i as f32 * 27.5, cy);
@@ -898,9 +899,38 @@ pub fn control_bar(
     }
 }
 
+/// Master volume slider: its usual place and width (140 points, 188 from the right edge),
+/// moved right of the metronome (which ends at `after`) and narrowed so it never reaches the
+/// icons at the right edge. Width 0 = no room at all, leave it out.
+fn volume_span(after: f32, right: f32) -> (f32, f32) {
+    const WIDTH: f32 = 140.0;
+    const MIN_WIDTH: f32 = 60.0;
+    let icons_left = right - 120.0;
+    let left = (right - 188.0 - WIDTH).max(after + 14.0);
+    let width = WIDTH.min(icons_left - 8.0 - left);
+    if width < MIN_WIDTH {
+        (left, 0.0)
+    } else {
+        (left, width)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_volume_never_covers_the_metronome_or_the_icons() {
+        // Wide bar: the usual place and width.
+        assert_eq!(volume_span(1200.0, 2000.0), (2000.0 - 328.0, 140.0));
+        // Narrow bar: after the metronome, narrowed before the icons.
+        let (left, width) = volume_span(1300.0, 1470.0);
+        assert!(left >= 1300.0 + 14.0);
+        assert!(left + width <= 1470.0 - 120.0 - 8.0 + 1e-3);
+        assert!(width >= 60.0 || width == 0.0);
+        // No room: left out.
+        assert_eq!(volume_span(1400.0, 1470.0).1, 0.0);
+    }
 
     #[test]
     fn slow_drags_add_up_to_whole_steps() {
