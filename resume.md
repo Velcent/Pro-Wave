@@ -10,7 +10,7 @@ scratch (vector shapes, own patch names); no Apple artwork or code is copied.
 
 | Phase | Status |
 |---|---|
-| **0 — Foundation** | **Mostly done.** Missing: CI never run, triple-buffer/`basedrop`, latency target (<20 ms) on Windows |
+| **0 — Foundation** | **Mostly done.** CI is green on Linux, Windows and macOS. Missing: triple-buffer/`basedrop`, latency target (<20 ms) on Windows |
 | **1 — Engine core + tracks** | **About half done.** Tempo map (engine), audio/MIDI regions, streaming and `.prowave` files work. Missing: tempo track UI, Aux/VCA/Folder/External MIDI tracks, Pattern/Drummer regions, clip gain/fades/reverse/normalize, 1000-track streaming, 24-track DoD test |
 | 2 — MIDI & sequencer | Started early: Piano Roll editing, quantize, velocity. Everything else missing |
 | 3 – 9 | Not started (some UI from Phase 4/8 — mixer look, Library — is drawn, without DSP) |
@@ -33,7 +33,7 @@ cargo run -p prowave-engine --example beep          # latency test
 | System | Status |
 |---|---|
 | **Windows** x86_64 | ✅ `cargo build --release -p prowave-app` (tested daily) |
-| **Linux** x86_64 | ✅ Built on 2026-10-19: `dist/prowave-linux-x86_64.tar.gz` (glibc 2.31+: Ubuntu 20.04+, Debian 11+). **Compiled, but not yet run on a Linux machine** |
+| **Linux** x86_64 | ✅ Built on 2026-10-19: `dist/prowave-linux-x86_64.tar.gz` (glibc 2.31+: Ubuntu 20.04+, Debian 11+). Also as `.deb`, `.rpm`, AppImage and Flatpak (GitHub release workflow, v0.1.1). **Launches under a virtual display on GitHub's runner; not yet run on real Linux hardware** |
 | **macOS** (Apple Silicon + Intel) | ❌ **Cannot be built on this Windows PC.** Building for macOS needs Apple's SDK (AppKit, CoreAudio, Metal), which only comes with Xcode on a Mac. Options: build on a Mac (`cargo build --release -p prowave-app`), or push the project to GitHub and run `.github/workflows/release.yml`, which builds a universal `Pro Wave.app` on GitHub's macOS runners |
 
 How the Linux build was made from Windows (cross-compiling, no WSL/Docker needed):
@@ -141,7 +141,10 @@ How the Linux build was made from Windows (cross-compiling, no WSL/Docker needed
   (licences/advisories), wasm32 build. Passes.
 - GitHub Actions CI file for Windows / macOS / Linux / wasm (`.github/workflows/ci.yml`).
 - Release workflow (`.github/workflows/release.yml`): Linux tarball and a universal macOS
-  `Pro Wave.app` (ad-hoc signed, not notarized). Never run yet (needs a GitHub repo).
+  `Pro Wave.app` (ad-hoc signed, not notarized), plus the `.deb`, `.rpm`, AppImage and Flatpak
+  packages. Ran on GitHub for v0.1.1: every job passed (packages install and remove cleanly on
+  Ubuntu and Fedora; the tarball and AppImage stay up for 15 s under Xvfb). Results are workflow
+  artifacts; there is no public Release page yet.
 - `beep` example measures output latency.
 
 ---
@@ -151,9 +154,15 @@ How the Linux build was made from Windows (cross-compiling, no WSL/Docker needed
 - `crates/prowave-project`: zip with `project.json` + `media/` (round-trip, version check,
   zip-slip protection, atomic save).
 - `prowave-app/src/project_io.rs`: app model ⇄ document; audio files embedded once each.
-- `prowave-app/src/file_commands.rs`: File › New… / Open… / Save / Save As… with native
-  dialogs (rfd), Ctrl/Cmd+N, O, S, Shift+S (shown in the menu), "save changes?" prompt
-  (playhead/selection don't count as changes), window title `<project> - Tracks`.
+- `prowave-app/src/file_commands.rs`: File › New… / Open… / Open Recent / Save / Save As… /
+  Save A Copy As… / Revert to Saved with native dialogs (rfd), Ctrl/Cmd+N, O, S, Shift+S (shown
+  in the menu), "save changes?" and "revert?" prompts (playhead/selection don't count as
+  changes), window title `<project> - Tracks`.
+- `prowave-app/src/recent_files.rs`: the Open Recent list (last 10 projects opened or saved,
+  newest first, missing files dropped) in `recent.txt` in the config folder (`%APPDATA%\prowave`,
+  `~/Library/Application Support/prowave`, `~/.config/prowave`). Listed flat in the File menu,
+  with Clear Menu. Save A Copy As… writes a copy and keeps the current file, title and unsaved
+  state; Revert to Saved reloads the file after asking.
 - `prowave song.prowave` opens a project from the command line (audio args import into it).
 - Verified: unit tests + launched the app with a project path (title, tempo, tracks loaded).
   The dialogs themselves have not been clicked through by hand yet.
@@ -196,10 +205,12 @@ arrangement (48 busy voices, filtered saw/square + vibrato, drums, metronome, te
 
 - **Latency on Windows:** ~32 ms with WASAPI shared mode; the roadmap target (<20 ms / <10 ms)
   needs ASIO (cpal `asio` feature), not wired yet.
-- **CI** is written but has never run (the folder is not a git repository yet).
-- **macOS:** no build exists yet. It can't be made on Windows; it has never been compiled
-  or run on macOS, so Mac-only problems (Metal, CoreAudio, menus, Cmd shortcuts) are untested.
-- **Linux:** the binary compiles but has never been launched on Linux.
+- **CI** runs on every push to `main` (Ubuntu, Windows, macOS) and is green.
+- **macOS:** the app compiles and bundles on GitHub's macOS runner (universal `.app`), but it
+  has never been launched on a Mac, so Mac-only problems (Metal, CoreAudio, menus, Cmd
+  shortcuts) are untested.
+- **Linux:** the binary starts and keeps running under a virtual display with software
+  OpenGL on GitHub's runner. Sound and a real GPU have not been tried.
 - **More than 64 tracks:** the engine has 64 track slots; tracks 65+ share the last slot's
   mixer settings (needs the Phase 1 track system).
 - **Sends** are stored and shown but not routed in the engine (no buses yet).
@@ -221,7 +232,7 @@ arrangement (48 busy voices, filtered saw/square + vibrato, drums, metronome, te
 
 | Roadmap item | | What's there / what's missing |
 |---|---|---|
-| `cargo xtask` + CI for mac/win/linux + wasm | 🟡 | `cargo xtask check` passes on Windows. CI file written but **never run** (no git repo/remote). Linux binary cross-builds from Windows; **macOS cannot be built on Windows** (needs a Mac or the GitHub macOS runner) |
+| `cargo xtask` + CI for mac/win/linux + wasm | 🟡 | `cargo xtask check` passes on Windows, and CI runs it on Linux, Windows and macOS for every push to `main` (green). The release workflow builds Linux tarball/.deb/.rpm/AppImage/Flatpak and the macOS `.app` on GitHub; **macOS cannot be built on Windows** (needs a Mac or the GitHub macOS runner) |
 | Lock-free primitives (`rtrb`, triple-buffer, `basedrop`) | 🟡 | `rtrb` command queue + garbage queue + `assert_no_alloc` done. **Missing:** triple-buffer, `basedrop` |
 | Logging, crash handler, DSP-load metrics | ✅ | `tracing`, `human-panic`, CPU meter in the LCD |
 | `cpal` playback + `beep` example | ✅ | Plays 440 Hz and reports output latency |
@@ -236,7 +247,7 @@ arrangement (48 busy voices, filtered saw/square + vibrato, drums, metronome, te
 | Regions: audio (wav/aiff/caf/mp3/flac), MIDI, Pattern, Drummer | 🟡 | Audio WAV/AIFF/FLAC + MIDI regions ✅. **Missing:** CAF and MP3 decoding, Pattern regions, Drummer regions |
 | Non-destructive editing: clip gain, fades, crossfades, reverse, normalize | ❌ | Only MIDI region parameters (quantize, transpose, velocity). **Missing:** all audio-region editing listed |
 | Disk streaming: memory-mapped + prefetch, 1000-track test | 🟡 | Background prefetch thread with per-clip rings ✅. **Missing:** memory mapping, 1000-track test |
-| Project file `.prowave` (zip, `project.json`, `media/`, `bounces/`) | 🟡 | Zip + JSON + `media/`, Open/Save/Save As, hardened loader ✅. Uses JSON, not `rkyv`. **Missing:** `bounces/`, Open Recent, Revert to Saved, Save A Copy As |
+| Project file `.prowave` (zip, `project.json`, `media/`, `bounces/`) | 🟡 | Zip + JSON + `media/`, Open/Save/Save As, Open Recent, Save A Copy As, Revert to Saved, hardened loader ✅. Uses JSON, not `rkyv`. **Missing:** `bounces/` |
 | **DoD:** import 24 tracks 48 kHz/24-bit, play without dropouts | ❌ | Not tested yet |
 
 ## 📋 Still to do (later phases)

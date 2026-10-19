@@ -209,11 +209,14 @@ This is exhaustive. Based on Logic Pro 10.7 / 11.
 ## 3. Phased Roadmap — Implementation Order for Claude
 
 ### Phase 0: Foundation (Weeks 1-4)
-- [ ] `cargo xtask` setup, CI for mac/win/linux + wasm
+- [x] `cargo xtask` setup, CI for mac/win/linux + wasm
   - Done: `cargo xtask check|wasm-check|rt-check` (fmt, clippy -D warnings, tests, no-alloc, cargo-deny, wasm32) passes on Windows.
-  - Linux: x86_64 release binary cross-builds from Windows (Zig + `cargo-zigbuild`, glibc 2.31+) and is packaged in `dist/prowave-linux-x86_64.tar.gz` with a full user README; audio thread asks for real-time priority (cpal `realtime`); window class set for desktop integration. Audio start falls back across devices/sample formats; the unsaved-changes prompt is in-app (no zenity); clippy `-D warnings` + test compilation pass for the Linux target; real DT_NEEDED is only libasound + libc. Compiled but never run on a Linux machine.
-  - macOS: cannot be built on Windows (needs Apple's SDK). `.github/workflows/release.yml` builds a universal ad-hoc-signed `.app` and the Linux tarball on GitHub runners.
-  - Pending: `.github/workflows/ci.yml` and `release.yml` written but never run (repo has no git remote yet); macOS unverified, Linux untested at runtime; native PipeWire/JACK back-ends, AppImage/.deb/Flatpak packaging.
+  - CI: `.github/workflows/ci.yml` runs `cargo xtask check` on Ubuntu, Windows and macOS (plus the
+    cross-target builds) on every push to `main` and is green on GitHub.
+  - Linux: x86_64 release binary cross-builds from Windows (Zig + `cargo-zigbuild`, glibc 2.31+) and is packaged in `dist/prowave-linux-x86_64.tar.gz` with a full user README; audio thread asks for real-time priority (cpal `realtime`); window class set for desktop integration. Audio start falls back across devices/sample formats; the unsaved-changes prompt is in-app (no zenity); clippy `-D warnings` + test compilation pass for the Linux target; real DT_NEEDED is only libasound + libc. The release workflow ran on GitHub (v0.1.1) and the packaged binary stays up for 15 s under a virtual X display with software OpenGL (tarball and AppImage), but it has not been run on real Linux hardware: no audio device or GPU has been tried.
+  - macOS: cannot be built on Windows (needs Apple's SDK). `.github/workflows/release.yml` builds a universal ad-hoc-signed `.app` on GitHub's macOS runner (built successfully for v0.1.1; never launched on a Mac).
+  - Release packages (v0.1.1, all built and install-checked on GitHub): Linux tarball, `.deb` (installed and removed on Ubuntu), `.rpm` (installed and removed in a Fedora 41 container), AppImage, Flatpak bundle, macOS `.app`. They are workflow artifacts, not yet published as a GitHub Release.
+  - Pending: a Windows build in the release workflow; publishing a GitHub Release page; macOS and real-Linux-hardware runs; native PipeWire/JACK back-ends.
 - [ ] Lock-free primitives: `rtrb` SPSC queue, triple-buffer, `basedrop` for real-time safe drop
   - Done: `rtrb` command queue + garbage queue (old songs freed off the audio thread); `assert_no_alloc` guard on `process()` in debug builds and tests.
   - Pending: triple-buffer, `basedrop`.
