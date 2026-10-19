@@ -427,6 +427,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
+          # Checksum lists (SHA256SUMS and any other file starting with SHA) are not published.
+          rm -f artifacts/SHA*
           ls -l artifacts
           sed "s/@VERSION@/${TAG#v}/g; s/@TAG@/$TAG/g" dist/release-notes.md > notes.md
           # A re-run of the same tag replaces the files instead of failing on the existing Release.
