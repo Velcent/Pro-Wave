@@ -1,97 +1,65 @@
-# ProWave
+# Pro Wave
 
-An open-source, clip-launching DAW in pure Rust, comparable in workflow to Logic Pro.
+**ProWave Studio** is an open-source music production app (DAW) in pure Rust, with a look and
+workflow modelled on Apple's Logic Pro. It is drawn entirely with [egui](https://github.com/emilk/egui)
+and plays audio through [cpal](https://github.com/RustAudio/cpal): no Electron, no JUCE.
 
-ProWave, under the same licence, GPL-3.0-or-later; the code it started from is the
-work of the Suhina contributors (`NOTICE`). Settings kept under the Loopwerk name carry over on the
-first start. <!-- rename_prowave: keep -->
+> **Status:** early development. Tracks, MIDI and audio regions, the Piano Roll, the Mixer, the
+> Library and the built-in synthesizer work; recording, undo/redo, effects processing and most
+> of Logic's instruments are still to come. [`ROADMAP.md`](ROADMAP.md) has the full plan and
+> [`resume.md`](resume.md) a detailed status of what works today.
 
-> **Status:** pre-alpha. ProWave opens Live Sets, plays and renders them (audio clips with
-> real-time time-stretching, MIDI through the built-in FM synth, sandboxed CLAP and VST3 plug-ins,
-> or sine tones), and lets agents edit them over MCP. The desktop app has the Session and
-> Arrangement views, a browser with a sample map, and settings. See [`ROADMAP.md`](ROADMAP.md) for what works and what comes next.
+ProWave is an independent project. It is not affiliated with, sponsored by or endorsed by Apple
+Inc. Logic Pro is a trademark of Apple Inc., used here only to describe the workflow ProWave
+follows. ProWave contains no Apple code, artwork or sounds.
 
-ProWave is an independent clean-room project. It is not affiliated with, sponsored by or
-endorsed by Ableton AG or any other company named here. Ableton and Live are trademarks of Ableton AG. VST is a registered trademark and ASIO a
-trademark of Steinberg Media Technologies GmbH. DX7 is a trademark of Yamaha Corporation. Stems
-and NKS are trademarks of Native Instruments. Other product names are trademarks of their
-owners. They are named only to describe file compatibility and comparable workflows. ProWave contains no code or content from Ableton
-products; see [`CONTRIBUTING.md`](CONTRIBUTING.md) › Clean-room.
+## What works
 
-## Goals
-
-- A real-time audio engine that never glitches, with offline rendering on the same code path.
-- Session-style clip launching with quantisation, plus a linear arrangement.
-- Reading `.als` projects you made yourself; later other formats such as DAWproject and `.flp`,
-  so projects are not locked to one program.
-- CLAP and VST3 plug-in hosting, sandboxed outside ProWave's process: a crashing plug-in never takes the project down.
-- Every action available headlessly: CLI and MCP for automation and agents.
+- **Engine** (`prowave-engine`): sample-accurate transport with cycle, metronome and a tempo map;
+  a lock-free command queue between UI and audio thread, with no allocations on the audio
+  thread; a built-in subtractive synthesizer with drum-kit modes (48 voices); per-track volume,
+  pan, mute, solo and meters; WAV, AIFF and FLAC regions streamed from disk.
+- **Tracks area:** ruler, cycle band, playhead, track headers, MIDI and audio regions with
+  waveforms; move, repeat and delete regions with snapping; per-track heights.
+- **Piano Roll:** draw, select, move, resize and delete notes; quantize (with strength and swing),
+  scale quantize, velocity lane, playable keyboard.
+- **Mixer:** channel strips with sends, pan, faders and meters; Library patches that change a
+  track's instrument and sound; Region and Track inspectors applied non-destructively.
+- **Projects:** `.prowave` files (a zip with `project.json` and the audio in `media/`).
+- **Time signatures:** any signature, including compound meters such as 6/8 and 7/8.
 
 ## Downloads
 
-ProWave has no published builds yet; build it from source (below). A build holds the desktop
-app `prowave`, the command-line tool `prowave-cli` and the plug-in host `prowave-plugin-host`, for
-Linux (x86_64), Windows (x64) and macOS (universal). The host is the process plug-ins run in: keep
-the three in one folder. The binaries are not signed yet, so macOS and Windows warn before running
-them. On Linux they need the ALSA library (`libasound2`).
-How a release is made: [`docs/releasing.md`](docs/releasing.md).
+Builds come from the [Release builds](.github/workflows/release.yml) workflow, from a version tag
+or run by hand from the Actions tab. Each run produces:
 
-## Try it
+| System | Files |
+|---|---|
+| Linux x86_64 (glibc 2.31+) | `.tar.gz` with an `install.sh`, `.deb` (Debian/Ubuntu), `.rpm` (Fedora/openSUSE), AppImage, Flatpak bundle |
+| macOS (Apple Silicon + Intel) | `ProWave Studio.app` (ad-hoc signed, not notarized) |
+| Windows x64 | build from source (below) |
+
+Download them from the run's **Artifacts** section. Linux install steps for every format, the
+libraries needed and troubleshooting are in [`dist/README-linux.txt`](dist/README-linux.txt).
+None of the packages has been tested on real Linux or macOS hardware yet; reports are welcome.
+
+## Run from source
 
 ```sh
-# Open a Live Set in the desktop app and launch its clips and scenes with the mouse; the
-# plug-in host is built first, since the app runs plug-ins in it (scan in Settings › Plug-ins)
-cargo build --release -p prowave-plugin-host
-cargo run --release -p prowave -- path/to/set.als
-
-# Play a Live Set on the default audio device (release builds play heavy sets smoothly)
-cargo run --release -p prowave-cli -- play path/to/set.als
-
-# Play one launcher scene instead of the arrangement
-cargo run --release -p prowave-cli -- play path/to/set.als --scene 2
-
-# Launch clips and scenes by typing commands (see below)
-cargo run --release -p prowave-cli -- play path/to/set.als --launcher
-
-# Render to a 32-bit float WAV
-cargo run --release -p prowave-cli -- render path/to/set.als -o out.wav
-
-# Play every MIDI track on the built-in FM synth, with voice 3 of a DX7 bank (.syx)
-cargo run --release -p prowave-cli -- play --demo --fm --voices path/to/bank.syx --voice 3
-
-# List the voices in a DX7 voice or bank file
-cargo run --release -p prowave-cli -- fm-synth voices path/to/bank.syx
-
-# Serve the Model Context Protocol for agents (see docs/mcp.md)
-cargo run --release -p prowave-cli -- mcp --read-root path/to/projects --write-root path/to/renders
+cargo run --release -p prowave-app                  # the app
+cargo run --release -p prowave-app -- song.prowave   # open a project
+cargo run --release -p prowave-app -- drums.wav      # new project, import audio files
+cargo run --release -p prowave-app -- --play         # start playing right away
+cargo run --release -p prowave-app -- --piano        # open the Piano Roll on start
+cargo run -p prowave-engine --example beep           # 440 Hz test tone, reports output latency
 ```
 
-`--demo` instead of a file uses a small built-in project. `--fm` works with `play` and `render`,
-for the demo or any set; without `--voices` the synth plays its initial voice, a plain sine.
-
-With `--launcher` the set starts stopped and ProWave reads one command per line:
-
-| Type | Does |
-|---|---|
-| `scene 2` | launch scene 2 |
-| `clip Bass 1` | launch the clip of track *Bass* in scene 1 |
-| `stop Bass`, `stopall` | stop one track, or every track |
-| `play`, `stop` | start or stop the transport |
-| `stop here` | stop the transport and stay where it stopped |
-| `pos 16` | move the song position to beat 16 |
-| `quant 1/4` | launch quantisation: `none`, `8 bars` … `1 bar`, or a note value from `1/2` to `1/32`, `T` for triplets (`1/8T`) |
-| `back` | return every track to the arrangement |
-| `state` (or `s`), `grid` | what is playing and queued; the scenes and clips |
-| `metronome on`, `metronome on -12`, `metronome off` (or `click …`) | a click on every beat, higher on the bar; level in dB (−6 by default) |
-| `tempo 100`, `vol Bass -6`, `mute Bass`, `unmute Bass` | edits, heard while playing |
-| `undo`, `redo` | undo or redo the last edit |
-| `track.setMute {"track": 1, "mute": true}` | any command by id, with JSON parameters |
-| `help` (or `?`), `quit` (or `exit`) | |
+Linux uses Ctrl where macOS uses Cmd: Space plays and stops, Ctrl+N/O/S new, open and save,
+Ctrl+R repeats a region, and Y, I and X toggle the Library, Inspector and Mixer.
 
 ## Building
 
-Linux builds talk to the sound card through ALSA, so its development files and `pkg-config`
-must be installed before building:
+Rust stable is required. On Linux, install ALSA's development files and `pkg-config` first:
 
 | Distribution family | Packages |
 |---|---|
@@ -99,54 +67,33 @@ must be installed before building:
 | Fedora, RHEL | `alsa-lib-devel pkgconf-pkg-config` |
 | Arch, Manjaro, EndeavourOS | `alsa-lib pkgconf` |
 
-Building the whole workspace also builds `prowave-plugin-host`, the program the desktop app
-runs plug-ins in; it has to sit next to `prowave`:
-
 ```sh
-cargo build --release
-cargo test --workspace
+cargo build --release -p prowave-app   # the program is target/release/prowave
+cargo xtask check                      # fmt, clippy -D warnings, tests, no-alloc check, cargo-deny, wasm check
 ```
 
-### ASIO on Windows
+## Workspace
 
-A default Windows build plays through WASAPI (shared, or exclusive when chosen in Settings ›
-Audio). ASIO, which talks to an audio interface's own driver, is a Cargo feature, because
-building it compiles the Steinberg ASIO SDK with the C++ compiler and generates its bindings with
-bindgen, which needs libclang:
-
-1. Install LLVM (for libclang), for example `winget install LLVM.LLVM`, and set
-   `LIBCLANG_PATH` to its `bin` folder (`C:\Program Files\LLVM\bin`) if the build does not
-   find it.
-2. Build with the feature:
-
-```sh
-cargo build --release -p prowave -p prowave-cli -p prowave-plugin-host --features prowave/asio,prowave-cli/asio
-```
-
-The SDK's host files are in [`third_party/asiosdk`](third_party/asiosdk/VENDORED.md), used under
-the GPL-3.0 that Steinberg offers it under since October 2025, and `.cargo/config.toml` points the
-build at them (`CPAL_ASIO_DIR`); nothing is downloaded. The SDK is GPL-3.0 only, so a build with
-`asio` is distributed under the GPL-3.0; ProWave's own code stays GPL-3.0-or-later. "ASIO" is a
-trademark of Steinberg Media Technologies GmbH.
+| Crate | What it is |
+|---|---|
+| [`crates/prowave-engine`](crates/prowave-engine) | Real-time audio engine: transport, tempo map, synth, mixer, disk streaming, cpal output |
+| [`crates/prowave-app`](crates/prowave-app) | The desktop app (egui): every view and editor |
+| [`crates/prowave-project`](crates/prowave-project) | The `.prowave` project file format |
+| [`xtask`](xtask) | `cargo xtask check`, `wasm-check` and `rt-check` |
+| [`dist/linux`](dist/linux) | Linux desktop entry, icon, MIME type, `install.sh` and the .deb, .rpm and Flatpak recipes |
 
 ## Documentation
 
 | | |
 |---|---|
-| [`docs/INDEX.md`](docs/INDEX.md) | Every document, what it is for, and the code it describes |
-| [`docs/commands.md`](docs/commands.md) | Every command the CLI, MCP server and UI run, with its parameters |
-| [`ROADMAP.md`](ROADMAP.md) | Milestones, what works now, what is next |
-| [`AGENTS.md`](AGENTS.md) | Rules for contributors and agents, and the crate map |
-| [`docs/architecture.md`](docs/architecture.md) | How the parts fit: layers, data flow, threads, commands, where new code goes |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Clean-room rules, licences, sign-off (DCO), AI-assisted contributions |
-| [`IP.md`](IP.md) | Reporting a rights or clean-room problem, and how material is removed |
-| [`docs/decisions/`](docs/decisions/) | Architecture decisions: the model, commands, time-stretching, devices, plug-in hosting, project files and more |
-| [`docs/spec/`](docs/spec/) | Clean-room specs: file formats (Live Sets, stems, NKS, DX7 voices, `.prowave`) and behaviour (clip launching, editing, the browser, the views) |
-| [`docs/mcp.md`](docs/mcp.md) | The MCP server: tools, file roots, errors |
-| [`docs/shortcuts.md`](docs/shortcuts.md) | Keyboard shortcuts in the desktop app, and how to change them |
-| [`docs/releasing.md`](docs/releasing.md) | How a release is built and published |
+| [`ROADMAP.md`](ROADMAP.md) | The Logic Pro feature inventory and the phased plan |
+| [`resume.md`](resume.md) | Current status, phase by phase |
+| [`AGENTS.md`](AGENTS.md) | Rules for contributors and AI agents: crate ownership, audio-thread rules, checks |
+| [`dist/README-linux.txt`](dist/README-linux.txt) | Installing and troubleshooting on Linux |
+| [`LOGICX-FORMAT-SPEC.md`](LOGICX-FORMAT-SPEC.md) | Notes for reading Logic Pro `.logicx` projects |
+| [`SECURITY.md`](SECURITY.md) | Reporting security problems |
 
 ## License
 
-ProWave is free software, licensed under the [GNU General Public License v3.0 or later](LICENSE).
-Contributions are licensed the same way.
+ProWave is free software under the GNU General Public License, version 3 or later
+(GPL-3.0-or-later). Contributions are licensed the same way.
