@@ -1,0 +1,555 @@
+//! ProWave project file (`.prowave`), Logic Pro equivalent: the `.logicx` project package.
+//!
+//! A `.prowave` file is a zip archive:
+//!
+//! ```text
+//! project.json      the arrangement (tracks, regions, notes, mixer, transport), see ProjectDoc
+//! media/…           audio files used by audio regions, copied in when the project is saved
+//! ```
+//!
+//! The roadmap mentions rkyv for `project.json`; this first version uses plain JSON (serde) so
+//! the file stays human-readable and diffable. Every struct uses `#[serde(default)]`, so older
+//! files keep loading when fields are added; files from a newer format version are rejected.
+use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use zip::write::SimpleFileOptions;
+use zip::{CompressionMethod, ZipArchive, ZipWriter};
+
+/// Bumped when the document changes in a way older readers cannot handle.
+pub const FORMAT_VERSION: u32 = 1;
+pub const PROJECT_JSON: &str = "project.json";
+pub const MEDIA_DIR: &str = "media/";
+pub const EXTENSION: &str = "prowave";
+/// Largest `project.json` accepted when loading (guards against zip bombs).
+pub const MAX_JSON_BYTES: u64 = 64 << 20;
+/// Most media data extracted from one project (guards against zip bombs filling the disk).
+pub const MAX_MEDIA_BYTES: u64 = 16 << 30;
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TrackKindDoc {
+    #[default]
+    Instrument,
+    Audio,
+    Drummer,
+    Bus,
+    Output,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct NoteDoc {
+    /// Beats from the region start.
+    pub start: f32,
+    pub len: f32,
+    pub pitch: u8,
+    pub vel: u8,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct RegionDoc {
+    pub name: String,
+    pub start_bar: f32,
+    pub len_bars: f32,
+    pub notes: Vec<NoteDoc>,
+    /// Path inside the archive (`media/…`) for audio regions.
+    pub audio: Option<String>,
+    pub mute: bool,
+    /// Playback quantize grid in beats.
+    pub quantize: Option<f32>,
+    pub transpose: i8,
+    pub velocity: i8,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct TrackDoc {
+    pub name: String,
+    pub kind: TrackKindDoc,
+    pub color: [u8; 3],
+    pub mute: bool,
+    pub solo: bool,
+    pub volume_db: f32,
+    pub pan: f32,
+    pub inserts: Vec<String>,
+    pub instrument: Option<String>,
+    /// Library category of the loaded patch.
+    pub category: Option<String>,
+    pub transpose: i8,
+    pub velocity: i8,
+    pub key_limit: (u8, u8),
+    pub vel_limit: (u8, u8),
+    pub send_bus: Option<u8>,
+    pub send_level: f32,
+    pub send_pre: bool,
+    /// Individual track height (factor of the global track zoom).
+    pub height: f32,
+    pub regions: Vec<RegionDoc>,
+}
+
+impl Default for TrackDoc {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            kind: TrackKindDoc::Instrument,
+            color: [0x4e, 0xb0, 0x4a],
+            mute: false,
+            solo: false,
+            volume_db: 0.0,
+            pan: 0.0,
+            inserts: Vec::new(),
+            instrument: None,
+            category: None,
+            transpose: 0,
+            velocity: 0,
+            key_limit: (0, 127),
+            vel_limit: (1, 127),
+            send_bus: None,
+            send_level: 0.0,
+            send_pre: false,
+            height: 1.0,
+            regions: Vec::new(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct ProjectDoc {
+    pub format_version: u32,
+    pub name: String,
+    pub tempo: f32,
+    pub sig: (u8, u8),
+    pub key: String,
+    pub position_beats: f64,
+    pub cycle: bool,
+    pub cycle_start: f64,
+    pub cycle_end: f64,
+    pub metronome: bool,
+    pub count_in: bool,
+    pub master_vol: f32,
+    pub selected_track: usize,
+    pub tracks: Vec<TrackDoc>,
+}
+
+impl Default for ProjectDoc {
+    fn default() -> Self {
+        Self {
+            format_version: FORMAT_VERSION,
+            name: "Untitled".into(),
+            tempo: 120.0,
+            sig: (4, 4),
+            key: "Cmaj".into(),
+            position_beats: 0.0,
+            cycle: false,
+            cycle_start: 0.0,
+            cycle_end: 16.0,
+            metronome: false,
+            count_in: true,
+            master_vol: 0.8,
+            selected_track: 0,
+            tracks: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ProjectError {
+    Io(std::io::Error),
+    Zip(String),
+    Json(String),
+    /// The file was written by a newer ProWave.
+    NewerVersion(u32),
+    /// Not a ProWave project (no `project.json`).
+    NotAProject,
+    /// The archive unpacks to more than the limit (bytes).
+    TooLarge(u64),
+}
+
+impl std::fmt::Display for ProjectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "i/o error: {e}"),
+            Self::Zip(e) => write!(f, "invalid project archive: {e}"),
+            Self::Json(e) => write!(f, "invalid project.json: {e}"),
+            Self::NewerVersion(v) => write!(
+                f,
+                "project format {v} is newer than this ProWave (supports {FORMAT_VERSION})"
+            ),
+            Self::NotAProject => write!(f, "not a ProWave project (project.json missing)"),
+            Self::TooLarge(limit) => write!(f, "project unpacks to more than {limit} bytes"),
+        }
+    }
+}
+
+impl std::error::Error for ProjectError {}
+
+impl From<std::io::Error> for ProjectError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+impl From<zip::result::ZipError> for ProjectError {
+    fn from(e: zip::result::ZipError) -> Self {
+        Self::Zip(e.to_string())
+    }
+}
+
+/// An audio file to embed: `source` on disk is stored at `zip_path` (`media/…`) in the archive.
+#[derive(Clone, Debug)]
+pub struct MediaFile {
+    pub zip_path: String,
+    pub source: PathBuf,
+}
+
+/// True if `p` is a safe archive-relative media path: `media/<name>` with no `..`, root,
+/// drive letter or backslash, so `media_dir.join(p)` stays inside `media_dir`. Paths read from
+/// `project.json` must pass this before they are opened.
+pub fn is_media_path(p: &str) -> bool {
+    let Some(rest) = p.strip_prefix(MEDIA_DIR) else {
+        return false;
+    };
+    !rest.is_empty()
+        && !p.contains(['\\', ':', '\0'])
+        && rest
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+/// Archive path for the `index`-th media file: `media/<index>_<file name>`, with any character
+/// that is not safe in a file name replaced by `_`.
+pub fn media_path(index: usize, source: &Path) -> String {
+    let name = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("audio");
+    let clean: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{MEDIA_DIR}{index}_{clean}")
+}
+
+/// Writes the project to `path`. The archive is written next to it first and then renamed, so
+/// a failed save never destroys the previous file.
+pub fn save(path: &Path, doc: &ProjectDoc, media: &[MediaFile]) -> Result<(), ProjectError> {
+    let tmp = path.with_extension(format!("{EXTENSION}.tmp"));
+    let written = write_archive(&tmp, doc, media);
+    if written.is_err() {
+        // Do not leave a half-written archive behind.
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+fn write_archive(tmp: &Path, doc: &ProjectDoc, media: &[MediaFile]) -> Result<(), ProjectError> {
+    {
+        let mut zip = ZipWriter::new(File::create(tmp)?);
+        let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        // Audio barely compresses: store it as-is (also faster to save and load).
+        let stored = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .large_file(true);
+        let mut doc = doc.clone();
+        doc.format_version = FORMAT_VERSION;
+        let json =
+            serde_json::to_vec_pretty(&doc).map_err(|e| ProjectError::Json(e.to_string()))?;
+        zip.start_file(PROJECT_JSON, deflated)?;
+        zip.write_all(&json)?;
+        for m in media {
+            if !is_media_path(&m.zip_path) {
+                return Err(ProjectError::Zip(format!("bad media path {}", m.zip_path)));
+            }
+            zip.start_file(m.zip_path.as_str(), stored)?;
+            let mut f = File::open(&m.source)?;
+            std::io::copy(&mut f, &mut zip)?;
+        }
+        zip.finish()?;
+    }
+    Ok(())
+}
+
+/// Reads `path`. Media files are extracted into `media_dir` (keeping their `media/…` names);
+/// the returned document's audio paths stay archive-relative, so resolve them with
+/// `media_dir.join(path)`. Entries outside `media/` or escaping the folder are ignored.
+pub fn load(path: &Path, media_dir: &Path) -> Result<ProjectDoc, ProjectError> {
+    load_with_limits(path, media_dir, MAX_JSON_BYTES, MAX_MEDIA_BYTES)
+}
+
+fn load_with_limits(
+    path: &Path,
+    media_dir: &Path,
+    max_json: u64,
+    max_media: u64,
+) -> Result<ProjectDoc, ProjectError> {
+    let mut zip = ZipArchive::new(File::open(path)?)?;
+    let doc: ProjectDoc = {
+        let mut entry = zip
+            .by_name(PROJECT_JSON)
+            .map_err(|_| ProjectError::NotAProject)?;
+        let mut json = String::new();
+        // Read at most one byte past the limit, so a bomb is detected without unpacking it.
+        (&mut entry).take(max_json + 1).read_to_string(&mut json)?;
+        if json.len() as u64 > max_json {
+            return Err(ProjectError::TooLarge(max_json));
+        }
+        serde_json::from_str(&json).map_err(|e| ProjectError::Json(e.to_string()))?
+    };
+    if doc.format_version > FORMAT_VERSION {
+        return Err(ProjectError::NewerVersion(doc.format_version));
+    }
+    let mut budget = max_media;
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i)?;
+        if entry.is_dir() {
+            continue;
+        }
+        // `enclosed_name` refuses absolute paths and `..` (zip-slip).
+        let Some(rel) = entry.enclosed_name() else {
+            continue;
+        };
+        if !rel.starts_with("media") {
+            continue;
+        }
+        let out = media_dir.join(&rel);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut f = File::create(&out)?;
+        let copied = std::io::copy(&mut (&mut entry).take(budget + 1), &mut f)?;
+        if copied > budget {
+            drop(f);
+            let _ = std::fs::remove_dir_all(media_dir);
+            return Err(ProjectError::TooLarge(max_media));
+        }
+        budget -= copied;
+    }
+    Ok(doc)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn sample_doc() -> ProjectDoc {
+        ProjectDoc {
+            name: "Song".into(),
+            tempo: 98.5,
+            cycle: true,
+            tracks: vec![
+                TrackDoc {
+                    name: "Keys".into(),
+                    inserts: vec!["Channel EQ".into()],
+                    instrument: Some("E-Piano".into()),
+                    category: Some("Keyboards".into()),
+                    key_limit: (36, 96),
+                    send_bus: Some(3),
+                    regions: vec![RegionDoc {
+                        name: "Keys".into(),
+                        start_bar: 1.0,
+                        len_bars: 4.0,
+                        notes: vec![NoteDoc {
+                            start: 0.5,
+                            len: 1.0,
+                            pitch: 60,
+                            vel: 90,
+                        }],
+                        quantize: Some(0.25),
+                        ..RegionDoc::default()
+                    }],
+                    ..TrackDoc::default()
+                },
+                TrackDoc {
+                    name: "Vox".into(),
+                    kind: TrackKindDoc::Audio,
+                    regions: vec![RegionDoc {
+                        name: "take".into(),
+                        audio: Some("media/0_take 1.wav".into()),
+                        ..RegionDoc::default()
+                    }],
+                    ..TrackDoc::default()
+                },
+            ],
+            ..ProjectDoc::default()
+        }
+    }
+
+    #[test]
+    fn round_trip_keeps_document_and_media() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("take 1.wav");
+        std::fs::write(&audio, b"RIFF fake audio bytes").unwrap();
+        let file = dir.path().join("song.prowave");
+        let media = vec![MediaFile {
+            zip_path: media_path(0, &audio),
+            source: audio.clone(),
+        }];
+        assert_eq!(media[0].zip_path, "media/0_take 1.wav");
+        save(&file, &sample_doc(), &media).unwrap();
+
+        let out = dir.path().join("extracted");
+        let doc = load(&file, &out).unwrap();
+        assert_eq!(doc, sample_doc());
+        let bytes = std::fs::read(out.join("media/0_take 1.wav")).unwrap();
+        assert_eq!(bytes, b"RIFF fake audio bytes");
+        assert!(!file.with_extension("prowave.tmp").exists());
+    }
+
+    #[test]
+    fn missing_fields_take_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("old.prowave");
+        let mut zip = ZipWriter::new(File::create(&file).unwrap());
+        zip.start_file(PROJECT_JSON, SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(br#"{"format_version":1,"name":"Old","tracks":[{"name":"A"}]}"#)
+            .unwrap();
+        zip.finish().unwrap();
+        let doc = load(&file, &dir.path().join("m")).unwrap();
+        assert_eq!(doc.name, "Old");
+        assert_eq!(doc.tempo, 120.0);
+        assert_eq!(doc.tracks[0].vel_limit, (1, 127));
+    }
+
+    #[test]
+    fn rejects_newer_versions_and_non_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let newer = dir.path().join("new.prowave");
+        let mut zip = ZipWriter::new(File::create(&newer).unwrap());
+        zip.start_file(PROJECT_JSON, SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(br#"{"format_version":99}"#).unwrap();
+        zip.finish().unwrap();
+        assert!(matches!(
+            load(&newer, dir.path()),
+            Err(ProjectError::NewerVersion(99))
+        ));
+
+        let other = dir.path().join("other.zip");
+        let mut zip = ZipWriter::new(File::create(&other).unwrap());
+        zip.start_file("readme.txt", SimpleFileOptions::default())
+            .unwrap();
+        zip.finish().unwrap();
+        assert!(matches!(
+            load(&other, dir.path()),
+            Err(ProjectError::NotAProject)
+        ));
+
+        let junk = dir.path().join("junk.prowave");
+        std::fs::write(&junk, b"not a zip").unwrap();
+        assert!(matches!(load(&junk, dir.path()), Err(ProjectError::Zip(_))));
+    }
+
+    #[test]
+    fn entries_outside_media_or_escaping_are_not_extracted() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("evil.prowave");
+        let mut zip = ZipWriter::new(File::create(&file).unwrap());
+        zip.start_file(PROJECT_JSON, SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"{}").unwrap();
+        zip.start_file("../escape.txt", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"x").unwrap();
+        zip.start_file("other/file.txt", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"x").unwrap();
+        zip.finish().unwrap();
+        let out = dir.path().join("out");
+        load(&file, &out).unwrap();
+        assert!(!dir.path().join("escape.txt").exists());
+        assert!(!out.join("other").exists());
+    }
+
+    #[test]
+    fn save_refuses_media_paths_outside_media() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.wav");
+        std::fs::write(&src, b"x").unwrap();
+        let bad = [MediaFile {
+            zip_path: "../a.wav".into(),
+            source: src,
+        }];
+        assert!(save(&dir.path().join("p.prowave"), &ProjectDoc::default(), &bad).is_err());
+        assert!(
+            !dir.path().join("p.prowave.tmp").exists(),
+            "temp file cleaned up"
+        );
+    }
+
+    #[test]
+    fn only_plain_media_paths_are_accepted() {
+        assert!(is_media_path("media/0_kick.wav"));
+        assert!(is_media_path("media/sub/1_vox.aif"));
+        for bad in [
+            "media/",
+            "media/../secret.wav",
+            "media/a/../../x.wav",
+            "media//x.wav",
+            "media/./x.wav",
+            "media\\..\\x.wav",
+            "media/C:/Windows/x.wav",
+            "/etc/passwd",
+            "C:\\Users\\me\\private.wav",
+            "other/x.wav",
+        ] {
+            assert!(!is_media_path(bad), "{bad}");
+        }
+    }
+
+    fn archive_with(dir: &Path, entries: &[(&str, &[u8])]) -> PathBuf {
+        let file = dir.join("bomb.prowave");
+        let mut zip = ZipWriter::new(File::create(&file).unwrap());
+        for (name, data) in entries {
+            zip.start_file(*name, SimpleFileOptions::default()).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap();
+        file
+    }
+
+    #[test]
+    fn oversized_project_json_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = format!("{{\"name\": \"{}\"}}", "x".repeat(200));
+        let file = archive_with(dir.path(), &[(PROJECT_JSON, json.as_bytes())]);
+        let out = dir.path().join("out");
+        assert!(matches!(
+            load_with_limits(&file, &out, 100, 1000),
+            Err(ProjectError::TooLarge(100))
+        ));
+        assert!(load_with_limits(&file, &out, 1000, 1000).is_ok());
+    }
+
+    #[test]
+    fn media_beyond_the_budget_is_rejected_and_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = vec![0u8; 600];
+        let file = archive_with(
+            dir.path(),
+            &[
+                (PROJECT_JSON, b"{}"),
+                ("media/0_a.wav", &big),
+                ("media/1_b.wav", &big),
+            ],
+        );
+        let out = dir.path().join("out");
+        assert!(matches!(
+            load_with_limits(&file, &out, 1000, 1000),
+            Err(ProjectError::TooLarge(1000))
+        ));
+        assert!(!out.exists(), "partial extraction removed");
+        assert!(load_with_limits(&file, &out, 1000, 1200).is_ok());
+    }
+}

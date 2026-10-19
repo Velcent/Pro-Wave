@@ -1,0 +1,506 @@
+//! Bridges the UI project model to `prowave-engine` using only `Command`s (never direct mutation).
+use crate::model::{Project, Region, Track};
+use crate::patches::synth_patch;
+use prowave_engine::{
+    Command, Engine, NoteEvent, Song, SynthPatch, TempoMap, TrackMix, MAX_TRACKS,
+};
+
+#[derive(Clone, Copy, PartialEq)]
+struct Mix {
+    gain_db: f32,
+    mute: bool,
+    solo: bool,
+    pan: f32,
+}
+
+/// Mirrors what the engine has accepted. Each field changes only when `Engine::send`
+/// returns `true`, so a command rejected because the queue was full is retried on the next
+/// `sync`. `None` means nothing has been accepted yet.
+pub struct EngineSync {
+    pub engine: Engine,
+    playing: bool,
+    /// Tempo and signature last sent (the project has one of each so far).
+    tempo: Option<(f32, (u8, u8))>,
+    metronome: bool,
+    cycle: (bool, f64, f64),
+    master: Option<f32>,
+    position: Option<f64>,
+    mixes: Vec<Mix>,
+    /// Last synth patch sent for each track (re-sent whenever the Library changes it).
+    patches: Vec<SynthPatch>,
+    song_rev: Option<u64>,
+    /// Audio layout of the song last sent with `SetSong`.
+    layout: Option<AudioLayout>,
+    /// A command was rejected during the last `sync`.
+    retry: bool,
+}
+
+/// Engine track number for UI track `i`. Tracks past the engine's `MAX_TRACKS` have none:
+/// they are left out of the song (silent) instead of being folded onto the last track.
+fn track_index(i: usize) -> Option<u8> {
+    (i < MAX_TRACKS).then_some(i as u8)
+}
+
+fn mixes(p: &Project) -> Vec<Mix> {
+    p.tracks
+        .iter()
+        .take(MAX_TRACKS)
+        .map(|t| Mix {
+            gain_db: t.volume_db,
+            mute: t.mute,
+            solo: t.solo,
+            pan: t.pan,
+        })
+        .collect()
+}
+
+/// Notes of one MIDI region as the engine should play them, with the Region Inspector
+/// (quantize, transpose, velocity) and Track Inspector (transpose, velocity, key and
+/// velocity limits) applied non-destructively, as Logic does on playback.
+fn region_notes(t: &Track, r: &Region, origin: f64, track: u8) -> Vec<NoteEvent> {
+    let (rp, tp) = (r.params, t.params);
+    r.notes
+        .iter()
+        .filter_map(|n| {
+            let start = match rp.quantize {
+                Some(q) if q > 0.0 => (n.start / q).round() * q,
+                _ => n.start,
+            };
+            let pitch = n.pitch as i32 + rp.transpose as i32 + tp.transpose as i32;
+            let vel = (n.vel as i32 + rp.velocity as i32 + tp.velocity as i32).clamp(1, 127);
+            let in_keys = (tp.key_limit.0 as i32..=tp.key_limit.1 as i32).contains(&pitch);
+            let in_vels = (tp.vel_limit.0 as i32..=tp.vel_limit.1 as i32).contains(&vel);
+            (in_keys && in_vels && (0..=127).contains(&pitch)).then_some(NoteEvent {
+                start_beat: origin + start as f64,
+                end_beat: origin + (start + n.len) as f64,
+                pitch: pitch as u8,
+                vel: vel as u8,
+                track,
+            })
+        })
+        .collect()
+}
+
+/// Every unmuted region on an engine track, with its engine track number and start beat
+/// (quarter notes, as the engine counts them).
+fn playing_regions(p: &Project) -> impl Iterator<Item = (u8, &Track, &Region, f64)> {
+    let beats_per_bar = p.beats_per_bar();
+    p.tracks
+        .iter()
+        .enumerate()
+        .filter_map(|(ti, t)| Some((track_index(ti)?, t)))
+        .flat_map(move |(track, t)| {
+            t.regions
+                .iter()
+                .filter(|r| !r.params.mute)
+                .map(move |r| (track, t, r, (r.start_bar as f64 - 1.0) * beats_per_bar))
+        })
+}
+
+fn song_notes(p: &Project) -> Vec<NoteEvent> {
+    playing_regions(p)
+        .flat_map(|(track, t, r, origin)| region_notes(t, r, origin, track))
+        .collect()
+}
+
+/// What the engine's streamed audio depends on: the track count and each playing audio
+/// region's file, track and start. When an edit leaves it unchanged (MIDI edits, mixer
+/// changes), only the notes are swapped and the audio streams keep running.
+#[derive(PartialEq, Default, Debug)]
+struct AudioLayout {
+    tracks: usize,
+    clips: Vec<(std::path::PathBuf, u8, u64)>,
+}
+
+fn audio_layout(p: &Project) -> AudioLayout {
+    AudioLayout {
+        tracks: p.tracks.len(),
+        clips: playing_regions(p)
+            .filter_map(|(track, _, r, origin)| {
+                let a = r.audio.as_ref()?;
+                Some((a.file.path.clone(), track, origin.to_bits()))
+            })
+            .collect(),
+    }
+}
+
+fn build_song(engine: &Engine, p: &Project) -> Song {
+    let clips = playing_regions(p)
+        .filter_map(|(track, _, r, origin)| {
+            let a = r.audio.as_ref()?;
+            Some(engine.stream_clip(&a.file, track, origin))
+        })
+        .collect();
+    let notes = song_notes(p);
+    let tracks = p
+        .tracks
+        .iter()
+        .take(MAX_TRACKS)
+        .map(|t| TrackMix {
+            gain_db: t.volume_db,
+            mute: t.mute,
+            solo: t.solo,
+            pan: t.pan,
+        })
+        .collect();
+    Song::new(notes, tracks).with_clips(clips)
+}
+
+/// The project's tempo and time signature as an engine tempo map.
+fn tempo_map(p: &Project) -> Command {
+    Command::SetTempoMap(Box::new(TempoMap::constant(p.tempo, p.sig)))
+}
+
+impl EngineSync {
+    pub fn new(engine: Engine, p: &Project) -> Self {
+        let mut sync = Self {
+            engine,
+            playing: false,
+            tempo: None,
+            metronome: false,
+            cycle: (false, 0.0, 0.0),
+            master: None,
+            position: None,
+            mixes: Vec::new(),
+            patches: Vec::new(),
+            song_rev: None,
+            layout: None,
+            retry: false,
+        };
+        sync.push(p);
+        sync
+    }
+
+    /// Call once per frame: push UI-side changes to the engine, then pull the playhead back.
+    pub fn sync(&mut self, p: &mut Project) {
+        let seek_done = self.push(p);
+        // Engine owns time while playing, unless a seek is still waiting to be accepted
+        // (then the UI keeps the requested position and `push` retries it).
+        if seek_done {
+            if p.playing {
+                p.position_beats = self.engine.shared().position();
+            }
+            self.position = Some(p.position_beats);
+        }
+    }
+
+    /// Sends every change the engine has not accepted yet. Returns `false` while a playhead
+    /// move is still pending.
+    fn push(&mut self, p: &Project) -> bool {
+        self.retry = false;
+        // Tracks or regions changed. Re-streaming audio reopens every file and briefly drops
+        // it out, so swap only the notes unless the audio layout itself changed.
+        if self.song_rev != Some(p.song_rev) {
+            let layout = audio_layout(p);
+            let sent = if self.layout.as_ref() == Some(&layout) {
+                self.send(Command::set_notes(song_notes(p)))
+            } else {
+                let song = build_song(&self.engine, p);
+                let sent = self.send(Command::SetSong(Box::new(song)));
+                if sent {
+                    self.mixes = mixes(p);
+                    self.layout = Some(layout);
+                }
+                sent
+            };
+            if sent {
+                self.song_rev = Some(p.song_rev);
+            }
+        }
+        // The user moved the playhead (ruler drag, rewind buttons, menu).
+        let seek_done = match self.position {
+            Some(q) if (p.position_beats - q).abs() <= 1e-9 => true,
+            _ => self.send(Command::SetPosition {
+                beat: p.position_beats,
+            }),
+        };
+        if p.playing != self.playing
+            && self.send(if p.playing {
+                Command::Play
+            } else {
+                Command::Pause
+            })
+        {
+            self.playing = p.playing;
+        }
+        if self.tempo != Some((p.tempo, p.sig)) && self.send(tempo_map(p)) {
+            self.tempo = Some((p.tempo, p.sig));
+        }
+        if p.metronome != self.metronome && self.send(Command::SetMetronome { on: p.metronome }) {
+            self.metronome = p.metronome;
+        }
+        let cycle = (p.cycle, p.cycle_start, p.cycle_end);
+        if cycle != self.cycle
+            && self.send(Command::SetCycle {
+                on: p.cycle,
+                start_beat: p.cycle_start,
+                end_beat: p.cycle_end,
+            })
+        {
+            self.cycle = cycle;
+        }
+        if self.master != Some(p.master_vol)
+            && self.send(Command::SetMasterGain {
+                linear: p.master_vol,
+            })
+        {
+            self.master = Some(p.master_vol);
+        }
+        // Library patches: send each track's synth patch whenever it changes. Stop at the
+        // first rejection so `patches` stays indexed by track; the rest go next frame.
+        for (i, t) in p.tracks.iter().enumerate().take(MAX_TRACKS) {
+            let patch = synth_patch(t);
+            if self.patches.get(i) == Some(&patch) {
+                continue;
+            }
+            let track = i as u8;
+            if !self.send(Command::SetTrackPatch { track, patch }) {
+                break;
+            }
+            if i < self.patches.len() {
+                self.patches[i] = patch;
+            } else {
+                self.patches.push(patch);
+            }
+        }
+        // Mixer moves. Until a song is accepted, its `SetSong` carries the mix instead.
+        if self.layout.is_some() {
+            for (i, t) in p.tracks.iter().enumerate().take(MAX_TRACKS) {
+                let m = Mix {
+                    gain_db: t.volume_db,
+                    mute: t.mute,
+                    solo: t.solo,
+                    pan: t.pan,
+                };
+                if self.mixes.get(i) == Some(&m) {
+                    continue;
+                }
+                let mix = TrackMix {
+                    gain_db: m.gain_db,
+                    mute: m.mute,
+                    solo: m.solo,
+                    pan: m.pan,
+                };
+                if !self.send(Command::SetTrackMix {
+                    track: i as u8,
+                    mix,
+                }) {
+                    break;
+                }
+                if let Some(slot) = self.mixes.get_mut(i) {
+                    *slot = m;
+                }
+            }
+        }
+        seek_done
+    }
+
+    /// `Engine::send`, remembering a rejection so the caller keeps redrawing to retry.
+    fn send(&mut self, cmd: Command) -> bool {
+        let sent = self.engine.send(cmd);
+        self.retry |= !sent;
+        sent
+    }
+
+    /// Whether a command was rejected (queue full) and is waiting to be retried.
+    pub fn needs_retry(&self) -> bool {
+        self.retry
+    }
+
+    pub fn underruns(&self) -> u32 {
+        self.engine
+            .shared()
+            .underruns
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Post-fader stereo peaks for the first `n` tracks (linear), for the mixer meters.
+    pub fn track_meters(&self, n: usize) -> Vec<(f32, f32)> {
+        (0..n)
+            .map(|i| self.engine.shared().track_peaks(i))
+            .collect()
+    }
+
+    /// Highest audio-callback DSP load since the last call (1.0 = full budget).
+    pub fn take_dsp_load(&self) -> f32 {
+        self.engine.shared().take_dsp_load()
+    }
+
+    pub fn master_peaks(&self) -> (f32, f32) {
+        self.engine.shared().peaks()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Note, RegionParams, TrackKind, TrackParams};
+
+    fn track(notes: Vec<Note>) -> Track {
+        Track {
+            name: "t".into(),
+            kind: TrackKind::Instrument,
+            color: egui::Color32::GREEN,
+            mute: false,
+            solo: false,
+            rec: false,
+            monitor: false,
+            volume_db: 0.0,
+            pan: 0.0,
+            inserts: vec![],
+            instrument: None,
+            regions: vec![Region {
+                name: "r".into(),
+                start_bar: 1.0,
+                len_bars: 1.0,
+                notes,
+                audio: None,
+                params: RegionParams::default(),
+            }],
+            params: TrackParams::default(),
+            category: None,
+            send: crate::model::SendSlot::default(),
+            height: 1.0,
+        }
+    }
+
+    fn note(start: f32, pitch: u8, vel: u8) -> Note {
+        Note {
+            start,
+            len: 0.5,
+            pitch,
+            vel,
+        }
+    }
+
+    #[test]
+    fn quantize_transpose_and_velocity_are_applied() {
+        let mut t = track(vec![note(0.9, 60, 100)]);
+        t.regions[0].params = RegionParams {
+            mute: false,
+            quantize: Some(0.25),
+            transpose: 12,
+            velocity: -10,
+        };
+        t.params.transpose = -2;
+        let out = region_notes(&t, &t.regions[0], 4.0, 3);
+        assert_eq!(out.len(), 1);
+        assert!(
+            (out[0].start_beat - 5.0).abs() < 1e-6,
+            "{}",
+            out[0].start_beat
+        );
+        assert_eq!((out[0].pitch, out[0].vel, out[0].track), (70, 90, 3));
+    }
+
+    #[test]
+    fn key_and_velocity_limits_filter_notes() {
+        let mut t = track(vec![
+            note(0.0, 40, 100),
+            note(1.0, 60, 100),
+            note(2.0, 60, 20),
+        ]);
+        t.params.key_limit = (48, 72);
+        t.params.vel_limit = (30, 127);
+        let out = region_notes(&t, &t.regions[0], 0.0, 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].pitch, 60);
+        assert!((out[0].start_beat - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn velocity_is_clamped_and_out_of_range_pitch_dropped() {
+        let mut t = track(vec![note(0.0, 120, 120), note(1.0, 60, 120)]);
+        t.regions[0].params.transpose = 12;
+        t.regions[0].params.velocity = 50;
+        let out = region_notes(&t, &t.regions[0], 0.0, 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].pitch, out[0].vel), (72, 127));
+    }
+
+    #[test]
+    fn regions_start_where_the_engine_puts_the_bar_in_any_signature() {
+        let mut p = Project::demo();
+        p.tracks.truncate(1);
+        p.tracks[0].regions.truncate(1);
+        p.tracks[0].regions[0].params.mute = false;
+        p.tracks[0].regions[0].start_bar = 3.0;
+        for (sig, quarters_per_bar) in [((4, 4), 4.0), ((6, 8), 3.0), ((7, 8), 3.5), ((2, 2), 4.0)]
+        {
+            p.sig = sig;
+            assert_eq!(p.beats_per_bar(), quarters_per_bar, "{sig:?}");
+            let (_, _, _, origin) = playing_regions(&p).next().unwrap();
+            // Bar 3 (1-based) is the engine's bar 2 (0-based).
+            let engine_beat = TempoMap::constant(p.tempo, sig).beat_of_bar(2);
+            assert!(
+                (origin - engine_beat).abs() < 1e-9,
+                "{sig:?}: {origin} vs {engine_beat}"
+            );
+        }
+    }
+
+    #[test]
+    fn bar_display_counts_signature_beats() {
+        let mut p = Project::demo();
+        // 4.75 quarter notes: bar 2 + 1.75 quarters.
+        assert_eq!(p.bbdt(4.75), (2, 1, 4, 1));
+        // In 6/8 a bar is 3 quarters: bar 2 + 1.75 quarters = 3.5 eighths -> beat 4, 16th 2.
+        p.sig = (6, 8);
+        assert_eq!(p.bbdt(4.75), (2, 4, 2, 1));
+        p.position_beats = 4.75;
+        assert_eq!(p.bar_beat_tick(), (2, 4, 480));
+    }
+
+    #[test]
+    fn tracks_past_the_engine_limit_are_left_out_not_aliased() {
+        let mut p = Project::demo();
+        p.tracks.truncate(1);
+        p.tracks[0].regions.truncate(1);
+        p.tracks[0].regions[0].params.mute = false;
+        p.tracks = vec![p.tracks[0].clone(); MAX_TRACKS + 3];
+        let notes = song_notes(&p);
+        let per_track = notes.iter().filter(|n| n.track == 0).count();
+        assert!(per_track > 0);
+        assert_eq!(notes.len(), per_track * MAX_TRACKS);
+        assert_eq!(
+            notes
+                .iter()
+                .filter(|n| usize::from(n.track) == MAX_TRACKS - 1)
+                .count(),
+            per_track,
+            "the last engine track must not collect notes from later tracks"
+        );
+        assert_eq!(mixes(&p).len(), MAX_TRACKS);
+        assert_eq!(track_index(MAX_TRACKS - 1), Some((MAX_TRACKS - 1) as u8));
+        assert_eq!(track_index(MAX_TRACKS), None);
+    }
+
+    #[test]
+    fn only_audio_changes_need_a_full_song_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("loop.wav");
+        crate::project_io::tests::write_wav(&wav);
+        let ctx = egui::Context::default();
+        let mut p = Project::demo();
+        crate::import::import_audio(&mut p, &wav, &ctx).unwrap();
+        let before = audio_layout(&p);
+        assert_eq!(before.clips.len(), 1);
+
+        // MIDI edits and mixer moves keep the streamed audio.
+        p.tracks[0].regions[0].notes[0].pitch += 1;
+        p.tracks[0].regions[0].start_bar += 1.0;
+        p.tracks[1].volume_db = -12.0;
+        assert_eq!(audio_layout(&p), before);
+
+        // Moving or muting the audio region, or adding a track, does not.
+        let audio = p.tracks.len() - 1;
+        p.tracks[audio].regions[0].start_bar += 1.0;
+        assert_ne!(audio_layout(&p), before);
+        p.tracks[audio].regions[0].start_bar -= 1.0;
+        p.tracks[audio].regions[0].params.mute = true;
+        assert_ne!(audio_layout(&p), before);
+        p.tracks[audio].regions[0].params.mute = false;
+        p.tracks.push(p.tracks[0].clone());
+        assert_ne!(audio_layout(&p), before);
+    }
+}

@@ -1,0 +1,41 @@
+# Flatpak manifest. It repackages the release binary built by CI (no compiling inside the
+# sandbox), so it is meant for a self-hosted .flatpak bundle, not Flathub. Expects the binary
+# at ../../target/release/prowave relative to this file:
+#   flatpak-builder --user --install-deps-from=flathub --repo=repo build dist/linux/studio.prowave.Studio.yml
+#   flatpak build-bundle repo prowave-studio.flatpak studio.prowave.Studio
+app-id: studio.prowave.Studio
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: prowave
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  # Audio: the runtime's ALSA library is routed to PulseAudio/PipeWire through this socket.
+  - --socket=pulseaudio
+  # Real-time priority for the audio thread, as on the host (rtkit).
+  - --system-talk-name=org.freedesktop.RealtimeKit1
+  # Projects and audio files can live anywhere in the home folder, and drag-and-drop from
+  # the file manager passes plain paths.
+  - --filesystem=home
+modules:
+  - name: prowave
+    buildsystem: simple
+    build-commands:
+      - install -D -m 755 prowave /app/bin/prowave
+      # Flatpak requires the desktop file, icon and MIME file to be named after the app id.
+      - install -D -m 644 prowave-studio.desktop /app/share/applications/studio.prowave.Studio.desktop
+      - sed -i 's/^Icon=.*/Icon=studio.prowave.Studio/' /app/share/applications/studio.prowave.Studio.desktop
+      - install -D -m 644 prowave.svg /app/share/icons/hicolor/scalable/apps/studio.prowave.Studio.svg
+      - install -D -m 644 prowave-mime.xml /app/share/mime/packages/studio.prowave.Studio.xml
+    sources:
+      - type: file
+        path: ../../target/release/prowave
+      - type: file
+        path: prowave-studio.desktop
+      - type: file
+        path: prowave.svg
+      - type: file
+        path: prowave-mime.xml

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ProWave Studio
+Comment=Music production studio
+Exec=prowave %F
+Icon=prowave
+StartupWMClass=prowave
+Terminal=false
+Categories=AudioVideo;Audio;Music;Midi;Sequencer;
+MimeType=application/x-prowave;

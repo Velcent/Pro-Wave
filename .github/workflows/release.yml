@@ -1,0 +1,349 @@
+# Release builds for Linux and macOS. macOS can only be built on a Mac (Apple's SDK), so this
+# runs on GitHub's macOS runners: a universal (Apple Silicon + Intel) "ProWave Studio.app",
+# ad-hoc signed (not notarized).
+# Linux (x86_64, glibc 2.31+): the `linux` job builds the binary once and ships the tarball
+# (binary, install.sh, desktop entry, icon, MIME type, README). The linux-* jobs repackage
+# that same binary as .deb, .rpm, AppImage and Flatpak, and test-install each one.
+# Run it from the Actions tab (workflow_dispatch) or by pushing a tag like v0.1.0.
+name: Release builds
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux x86_64 tarball
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install audio/windowing dev packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release -p prowave-app
+      # Same layout as the locally built dist/prowave-linux-x86_64.tar.gz: program, user
+      # install script, menu entry, icon, .prowave MIME type and the Linux README.
+      # `install -m` sets modes explicitly, so the scripts stay executable whatever git recorded.
+      - name: Package
+        run: |
+          pkg=dist/prowave-linux-x86_64
+          rm -rf "$pkg" && mkdir -p "$pkg"
+          install -m 755 target/release/prowave dist/linux/install.sh "$pkg/"
+          install -m 644 dist/linux/prowave-studio.desktop dist/linux/prowave.svg \
+            dist/linux/prowave-mime.xml "$pkg/"
+          install -m 644 dist/README-linux.txt "$pkg/README.txt"
+          tar -C dist -czf prowave-linux-x86_64.tar.gz prowave-linux-x86_64
+      - name: Check package contents and install.sh
+        run: |
+          sudo apt-get install -y desktop-file-utils shared-mime-info
+          desktop-file-validate dist/linux/prowave-studio.desktop
+          work=$(mktemp -d)
+          tar -C "$work" -xzf prowave-linux-x86_64.tar.gz
+          pkg="$work/prowave-linux-x86_64"
+          for f in prowave install.sh prowave-studio.desktop prowave.svg prowave-mime.xml README.txt; do
+            test -f "$pkg/$f" || { echo "::error::package is missing $f"; exit 1; }
+          done
+          test -x "$pkg/prowave" && test -x "$pkg/install.sh"
+          # Install into a throwaway HOME, check every file landed, then uninstall.
+          home=$(mktemp -d)
+          HOME="$home" "$pkg/install.sh"
+          test -x "$home/.local/bin/prowave"
+          test -f "$home/.local/share/applications/prowave-studio.desktop"
+          test -f "$home/.local/share/icons/hicolor/scalable/apps/prowave.svg"
+          test -f "$home/.local/share/mime/packages/prowave.xml"
+          grep -q 'application/x-prowave' "$home/.local/share/mime/globs2"
+          HOME="$home" "$pkg/install.sh" --uninstall
+          test ! -e "$home/.local/bin/prowave"
+          test ! -e "$home/.local/share/applications/prowave-studio.desktop"
+      # Starts the packaged binary under a virtual X display with software OpenGL and
+      # checks it is still running after 15 s (timeout's exit code 124). The runner has no
+      # sound card, which the app tolerates ("No sound" in the menu bar). Not yet proven
+      # on GitHub's runners, so a failure here is reported but does not block the release.
+      - name: Launch smoke test (Xvfb, software GL)
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y xvfb libegl1 libgl1-mesa-dri libxkbcommon-x11-0 \
+            libxcursor1 libxrandr2 libxi6
+          work=$(mktemp -d)
+          tar -C "$work" -xzf prowave-linux-x86_64.tar.gz
+          status=0
+          xvfb-run -a sh -c "WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1 RUST_LOG=warn,prowave=info \
+            timeout 15 '$work/prowave-linux-x86_64/prowave'" || status=$?
+          if [ "$status" -ne 124 ]; then
+            echo "::error::prowave exited early with status $status"
+            exit 1
+          fi
+          echo "prowave was still running after 15 s"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prowave-linux-x86_64
+          path: prowave-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------------------
+  # Each job below unpacks the tarball's binary to target/release/prowave (where the package
+  # recipes in dist/linux expect it) and reads the version from the app's Cargo.toml.
+
+  linux-deb:
+    name: Linux .deb (Debian/Ubuntu)
+    needs: linux
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: prowave-linux-x86_64
+      - name: Unpack release binary
+        run: |
+          tar -xzf prowave-linux-x86_64.tar.gz
+          install -D -m 755 prowave-linux-x86_64/prowave target/release/prowave
+          echo "VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/prowave-app/Cargo.toml | head -1)" >> "$GITHUB_ENV"
+      # Same files as install.sh puts in ~/.local, under /usr. Menu, icon and MIME caches are
+      # refreshed by the dpkg triggers of desktop-file-utils, hicolor-icon-theme and
+      # shared-mime-info.
+      - name: Build .deb
+        run: |
+          root=dist/deb
+          rm -rf "$root"
+          install -D -m 755 target/release/prowave "$root/usr/bin/prowave"
+          install -D -m 644 dist/linux/prowave-studio.desktop "$root/usr/share/applications/prowave-studio.desktop"
+          install -D -m 644 dist/linux/prowave.svg "$root/usr/share/icons/hicolor/scalable/apps/prowave.svg"
+          install -D -m 644 dist/linux/prowave-mime.xml "$root/usr/share/mime/packages/prowave.xml"
+          install -D -m 644 dist/README-linux.txt "$root/usr/share/doc/prowave-studio/README.txt"
+          install -D -m 644 dist/linux/debian-copyright "$root/usr/share/doc/prowave-studio/copyright"
+          mkdir -p "$root/DEBIAN"
+          sed "s/@VERSION@/$VERSION/" dist/linux/debian-control > "$root/DEBIAN/control"
+          echo "Installed-Size: $(du -sk "$root/usr" | cut -f1)" >> "$root/DEBIAN/control"
+          dpkg-deb --build --root-owner-group "$root" "prowave-studio_${VERSION}_amd64.deb"
+          dpkg-deb --info "prowave-studio_${VERSION}_amd64.deb"
+          dpkg-deb --contents "prowave-studio_${VERSION}_amd64.deb"
+      - name: Check .deb installs and removes
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y desktop-file-utils "./prowave-studio_${VERSION}_amd64.deb"
+          test -x /usr/bin/prowave
+          # (`! cmd` would never fail the step: bash's -e ignores negated commands.)
+          if ldd /usr/bin/prowave | grep 'not found'; then exit 1; fi
+          grep -q 'application/x-prowave' /usr/share/mime/globs2
+          desktop-file-validate /usr/share/applications/prowave-studio.desktop
+          sudo apt-get remove -y prowave-studio
+          test ! -e /usr/bin/prowave
+          test ! -e /usr/share/applications/prowave-studio.desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prowave-linux-deb
+          path: prowave-studio_*_amd64.deb
+          if-no-files-found: error
+
+  linux-rpm:
+    name: Linux .rpm (Fedora/openSUSE)
+    needs: linux
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: prowave-linux-x86_64
+      - name: Unpack release binary
+        run: |
+          tar -xzf prowave-linux-x86_64.tar.gz
+          install -D -m 755 prowave-linux-x86_64/prowave target/release/prowave
+          echo "VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/prowave-app/Cargo.toml | head -1)" >> "$GITHUB_ENV"
+      - name: Build .rpm
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+          src=$(mktemp -d)
+          cp target/release/prowave dist/linux/prowave-studio.desktop dist/linux/prowave.svg \
+            dist/linux/prowave-mime.xml "$src/"
+          cp dist/README-linux.txt "$src/README.txt"
+          rpmbuild -bb dist/linux/prowave-studio.spec \
+            --define "_sourcedir $src" --define "_rpmdir $PWD/rpm" --define "pkg_version $VERSION"
+          mv rpm/x86_64/prowave-studio-*.rpm .
+          rpm -qpi prowave-studio-*.rpm
+          rpm -qpl prowave-studio-*.rpm
+          # The ALSA dependency must have been found from the ELF.
+          reqs=$(rpm -qpR prowave-studio-*.rpm)
+          echo "$reqs"
+          grep -qF 'libasound.so.2()(64bit)' <<<"$reqs"
+      # Installs into a clean Fedora container, so dnf has to resolve every dependency itself.
+      - name: Check .rpm installs and removes on Fedora
+        run: |
+          docker run --rm -v "$PWD:/pkg" fedora:41 sh -euc '
+            dnf install -y shared-mime-info desktop-file-utils
+            dnf install -y /pkg/prowave-studio-*.x86_64.rpm
+            test -x /usr/bin/prowave
+            if ldd /usr/bin/prowave | grep "not found"; then exit 1; fi
+            grep -q application/x-prowave /usr/share/mime/globs2
+            desktop-file-validate /usr/share/applications/prowave-studio.desktop
+            dnf remove -y prowave-studio
+            test ! -e /usr/bin/prowave'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prowave-linux-rpm
+          path: prowave-studio-*.x86_64.rpm
+          if-no-files-found: error
+
+  linux-appimage:
+    name: Linux AppImage
+    needs: linux
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: prowave-linux-x86_64
+      - name: Unpack release binary
+        run: |
+          tar -xzf prowave-linux-x86_64.tar.gz
+          install -D -m 755 prowave-linux-x86_64/prowave target/release/prowave
+          echo "VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/prowave-app/Cargo.toml | head -1)" >> "$GITHUB_ENV"
+      # Only the program is bundled: ALSA, GPU and windowing libraries come from the host, like
+      # the tarball (glibc 2.31+). appimagetool is pinned to 1.9.1 and checked by SHA-256.
+      - name: Build AppImage
+        run: |
+          app=ProWave.AppDir
+          install -D -m 755 target/release/prowave "$app/usr/bin/prowave"
+          install -D -m 644 dist/linux/prowave-studio.desktop "$app/usr/share/applications/prowave-studio.desktop"
+          install -D -m 644 dist/linux/prowave.svg "$app/usr/share/icons/hicolor/scalable/apps/prowave.svg"
+          install -D -m 644 dist/linux/prowave-mime.xml "$app/usr/share/mime/packages/prowave.xml"
+          install -m 644 dist/linux/prowave-studio.desktop dist/linux/prowave.svg "$app/"
+          ln -s prowave.svg "$app/.DirIcon"
+          ln -s usr/bin/prowave "$app/AppRun"
+          curl -fsSL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool" | sha256sum -c -
+          chmod +x appimagetool
+          # The runner has no FUSE, so appimagetool runs from its extracted self.
+          ARCH=x86_64 VERSION="$VERSION" APPIMAGE_EXTRACT_AND_RUN=1 \
+            ./appimagetool "$app" "ProWave_Studio-${VERSION}-x86_64.AppImage"
+          chmod +x "ProWave_Studio-${VERSION}-x86_64.AppImage"
+      - name: Check AppImage contents
+        run: |
+          img="$PWD/ProWave_Studio-${VERSION}-x86_64.AppImage"
+          work=$(mktemp -d) && cd "$work"
+          "$img" --appimage-extract >/dev/null
+          test -x squashfs-root/usr/bin/prowave
+          test -f squashfs-root/prowave-studio.desktop
+          cmp squashfs-root/usr/bin/prowave "$GITHUB_WORKSPACE/target/release/prowave"
+      # Same check as the tarball's smoke test, through the AppImage runtime. Reported, but
+      # not blocking until it has passed on GitHub's runners.
+      - name: Launch smoke test (Xvfb, software GL)
+        continue-on-error: true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libasound2 libegl1 libgl1-mesa-dri libxkbcommon-x11-0 \
+            libxcursor1 libxrandr2 libxi6
+          status=0
+          xvfb-run -a sh -c "APPIMAGE_EXTRACT_AND_RUN=1 WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1 \
+            timeout 15 ./ProWave_Studio-${VERSION}-x86_64.AppImage" || status=$?
+          if [ "$status" -ne 124 ]; then
+            echo "::error::the AppImage exited early with status $status"
+            exit 1
+          fi
+          echo "AppImage was still running after 15 s"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prowave-linux-appimage
+          path: ProWave_Studio-*-x86_64.AppImage
+          if-no-files-found: error
+
+  linux-flatpak:
+    name: Linux Flatpak bundle
+    needs: linux
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: prowave-linux-x86_64
+      - name: Unpack release binary
+        run: |
+          tar -xzf prowave-linux-x86_64.tar.gz
+          install -D -m 755 prowave-linux-x86_64/prowave target/release/prowave
+          echo "VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/prowave-app/Cargo.toml | head -1)" >> "$GITHUB_ENV"
+      # Runtime org.freedesktop.Platform 24.08 comes from Flathub; the bundle refers users'
+      # flatpak to Flathub for it when they install the .flatpak file.
+      - name: Build Flatpak bundle
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak-builder --user --install-deps-from=flathub --force-clean \
+            --repo=flatpak-repo flatpak-build dist/linux/studio.prowave.Studio.yml
+          flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+            flatpak-repo "prowave-studio-${VERSION}-x86_64.flatpak" studio.prowave.Studio
+      - name: Check Flatpak installs and removes
+        run: |
+          flatpak install --user -y --noninteractive "./prowave-studio-${VERSION}-x86_64.flatpak"
+          flatpak info studio.prowave.Studio
+          flatpak run --command=sh studio.prowave.Studio -c \
+            'test -x /app/bin/prowave && if ldd /app/bin/prowave | grep "not found"; then exit 1; fi'
+          export_dir="$HOME/.local/share/flatpak/exports/share"
+          test -f "$export_dir/applications/studio.prowave.Studio.desktop"
+          test -f "$export_dir/icons/hicolor/scalable/apps/studio.prowave.Studio.svg"
+          flatpak uninstall --user -y --noninteractive studio.prowave.Studio
+          if flatpak info studio.prowave.Studio; then exit 1; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prowave-linux-flatpak
+          path: prowave-studio-*-x86_64.flatpak
+          if-no-files-found: error
+
+  macos:
+    name: macOS universal app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build both architectures
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          cargo build --release -p prowave-app --target aarch64-apple-darwin
+          cargo build --release -p prowave-app --target x86_64-apple-darwin
+      - name: Bundle ProWave Studio.app
+        run: |
+          APP="dist/ProWave Studio.app"
+          mkdir -p "$APP/Contents/MacOS"
+          lipo -create -output "$APP/Contents/MacOS/prowave" \
+            target/aarch64-apple-darwin/release/prowave \
+            target/x86_64-apple-darwin/release/prowave
+          VERSION=$(cargo pkgid -p prowave-app | sed 's/.*[#@]//')
+          cat > "$APP/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>ProWave Studio</string>
+            <key>CFBundleDisplayName</key><string>ProWave Studio</string>
+            <key>CFBundleIdentifier</key><string>studio.prowave.app</string>
+            <key>CFBundleExecutable</key><string>prowave</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>NSMicrophoneUsageDescription</key><string>ProWave Studio records audio from your inputs.</string>
+          </dict>
+          </plist>
+          EOF
+          codesign --force --deep --sign - "$APP"
+          ditto -c -k --keepParent "$APP" prowave-macos-universal.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prowave-macos-universal
+          path: prowave-macos-universal.zip
+          if-no-files-found: error

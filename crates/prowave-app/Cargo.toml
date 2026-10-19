@@ -1,0 +1,24 @@
+[package]
+name = "prowave-app"
+version = "0.1.0"
+edition = "2021"
+description = "ProWave Studio desktop app (egui) - clean-room DAW UI inspired by Logic Pro"
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "prowave"
+path = "src/main.rs"
+
+[dependencies]
+assert_no_alloc = "1.1.2"
+eframe = "0.37.0"
+egui = "0.37"
+human-panic = "2.0.8"
+prowave-engine = { version = "0.1.0", path = "../prowave-engine" }
+prowave-project = { version = "0.1.0", path = "../prowave-project" }
+rfd = "0.17.2"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
