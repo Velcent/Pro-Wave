@@ -43,18 +43,27 @@ follows. ProWave contains no Apple code, artwork or sounds.
 
 ## Downloads
 
-Builds come from the [Release builds](.github/workflows/release.yml) workflow, from a version tag
-or run by hand from the Actions tab. Each run produces:
+Get the latest build from the [Releases page](https://github.com/fabox-os/Pro-Wave/releases)
+(each version is a pre-release while Pro Wave is in early development):
 
-| System | Files |
+| System | File |
 |---|---|
-| Linux x86_64 (glibc 2.31+) | `.tar.gz` with an `install.sh`, `.deb` (Debian/Ubuntu), `.rpm` (Fedora/openSUSE), AppImage, Flatpak bundle |
-| macOS (Apple Silicon + Intel) | `Pro Wave.app` (ad-hoc signed, not notarized) |
-| Windows x64 | build from source (below) |
+| Windows 10/11 x64 | `prowave-windows-x86_64.zip`: unzip and run `prowave.exe` |
+| macOS (Apple Silicon + Intel) | `prowave-macos-universal.zip` with `Pro Wave.app` (ad-hoc signed, not notarized) |
+| Debian, Ubuntu, Mint | `.deb` |
+| Fedora, openSUSE, RHEL 9+ | `.rpm` |
+| Any Linux | AppImage, Flatpak bundle, or `prowave-linux-x86_64.tar.gz` with an `install.sh` |
 
-Download them from the run's **Artifacts** section. Linux install steps for every format, the
-libraries needed and troubleshooting are in [`dist/README-linux.txt`](dist/README-linux.txt).
-None of the packages has been tested on real Linux or macOS hardware yet; reports are welcome.
+The files are not code signed, so Windows SmartScreen and macOS Gatekeeper warn before running
+them; the release notes say how to continue. Each release also lists a `SHA256SUMS` file.
+Linux install steps for every format, the libraries needed and troubleshooting are in
+[`dist/README-linux.txt`](dist/README-linux.txt). The Linux and macOS packages have not been
+tested on real hardware yet; reports are welcome.
+
+Pushing a version tag such as `v0.1.2` runs the [Release builds](.github/workflows/release.yml)
+workflow, which builds every package, test-installs the Linux ones and publishes the Release.
+Running it by hand from the Actions tab builds the packages as workflow artifacts without
+publishing.
 
 ## Run from source
 

@@ -1,10 +1,13 @@
 # Release builds for Linux and macOS. macOS can only be built on a Mac (Apple's SDK), so this
 # runs on GitHub's macOS runners: a universal (Apple Silicon + Intel) "Pro Wave.app",
 # ad-hoc signed (not notarized).
+# Windows (x64): the `windows` job builds prowave.exe and zips it.
 # Linux (x86_64, glibc 2.31+): the `linux` job builds the binary once and ships the tarball
 # (binary, install.sh, desktop entry, icon, MIME type, README). The linux-* jobs repackage
 # that same binary as .deb, .rpm, AppImage and Flatpak, and test-install each one.
-# Run it from the Actions tab (workflow_dispatch) or by pushing a tag like v0.1.0.
+# Pushing a tag like v0.1.2 builds everything and then the `release` job publishes a public
+# GitHub Release with all the files and their checksums. Running it by hand from the Actions
+# tab (workflow_dispatch) builds everything but publishes nothing.
 name: Release builds
 
 on:
@@ -14,6 +17,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+
+# Read-only by default; only the `release` job may write (to publish the Release).
+permissions:
+  contents: read
 
 jobs:
   linux:
@@ -349,3 +356,85 @@ jobs:
           name: prowave-macos-universal
           path: prowave-macos-universal.zip
           if-no-files-found: error
+
+  windows:
+    name: Windows x64 zip
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release -p prowave-app
+      - name: Package
+        shell: pwsh
+        run: |
+          $pkg = "prowave-windows-x86_64"
+          New-Item -ItemType Directory -Force $pkg | Out-Null
+          Copy-Item target/release/prowave.exe, LICENSE $pkg
+          Copy-Item dist/windows/README.txt "$pkg/README.txt"
+          Compress-Archive -Path $pkg -DestinationPath "$pkg.zip" -Force
+      - name: Check zip contents
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "zipcheck"
+          Expand-Archive prowave-windows-x86_64.zip $out
+          foreach ($f in 'prowave.exe', 'README.txt', 'LICENSE') {
+            if (-not (Test-Path (Join-Path $out "prowave-windows-x86_64/$f"))) { throw "the zip is missing $f" }
+          }
+          $exe = Get-Item (Join-Path $out "prowave-windows-x86_64/prowave.exe")
+          "$($exe.VersionInfo.ProductName), $($exe.Length) bytes"
+          # build.rs embeds the icon and the product name; a missing resource means it did not run.
+          if ($exe.VersionInfo.ProductName -ne 'Pro Wave') { throw "the icon/version resource is missing" }
+      # Starts the program and checks it is still running after 15 s. The runner may have no
+      # usable GPU or sound card, so this is reported but does not block the release.
+      - name: Launch smoke test
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP "zipcheck/prowave-windows-x86_64/prowave.exe"
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 15
+          if ($p.HasExited) {
+            Write-Output "::error::prowave exited early with code $($p.ExitCode)"
+            exit 1
+          }
+          Stop-Process -Id $p.Id -Force
+          "prowave was still running after 15 s"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prowave-windows-x86_64
+          path: prowave-windows-x86_64.zip
+          if-no-files-found: error
+
+  # Only for a pushed version tag, and only when every package above was built.
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, linux-deb, linux-rpm, linux-appimage, linux-flatpak, macos, windows]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: prowave-*
+          merge-multiple: true
+      - name: Publish the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l artifacts
+          (cd artifacts && sha256sum -- * > ../SHA256SUMS) && mv SHA256SUMS artifacts/
+          cat artifacts/SHA256SUMS
+          sed "s/@VERSION@/${TAG#v}/g; s/@TAG@/$TAG/g" dist/release-notes.md > notes.md
+          # A re-run of the same tag replaces the files instead of failing on the existing Release.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            gh release create "$TAG" artifacts/* --title "Pro Wave ${TAG#v}" \
+              --notes-file notes.md --prerelease --verify-tag
+          fi
