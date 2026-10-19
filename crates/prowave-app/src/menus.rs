@@ -18,7 +18,7 @@ const FILE: &[&str] = &[
     "Save As…",
     "Save A Copy As…",
     "Save as Template…",
-    "Revert to",
+    "Revert to Saved",
     "-",
     "Import",
     "Export",
@@ -223,7 +223,7 @@ pub fn bar_fill(light: bool) -> Color32 {
 /// Logic's default key commands for the entries this app implements.
 fn shortcut(label: &str) -> Option<KeyboardShortcut> {
     if let Some(cmd) = FileCmd::from_menu(label) {
-        return Some(cmd.shortcut());
+        return cmd.shortcut();
     }
     let key = match label {
         "Show Library" => Key::Y,
@@ -275,7 +275,18 @@ fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
 
 /// One menu entry: check column, title, key command. Returns true when chosen.
 fn item(ui: &mut egui::Ui, label: &str, check: bool, key: Option<String>, look: &Look) -> bool {
-    let enabled = !GREYED.contains(&label);
+    item_with(ui, label, !GREYED.contains(&label), check, key, look)
+}
+
+/// Like [`item`], with the greyed-out state given by the caller.
+fn item_with(
+    ui: &mut egui::Ui,
+    label: &str,
+    enabled: bool,
+    check: bool,
+    key: Option<String>,
+    look: &Look,
+) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::click());
     let hot = enabled && resp.hovered();
     let g = ui.painter();
@@ -326,6 +337,44 @@ fn separator(ui: &mut egui::Ui, look: &Look) {
     );
 }
 
+/// How a remembered project is listed: "Night Drive  (Music)", so equal names in different
+/// folders can be told apart.
+fn recent_label(path: &std::path::Path) -> String {
+    let name = path.file_stem().and_then(|n| n.to_str()).unwrap_or("?");
+    match path
+        .parent()
+        .and_then(|d| d.file_name())
+        .and_then(|d| d.to_str())
+    {
+        Some(folder) => format!("    {name}  ({folder})"),
+        None => format!("    {name}"),
+    }
+}
+
+/// "Open Recent" with the remembered projects under it. They are listed flat, because this
+/// menu has no submenus.
+fn recent_items(ui: &mut egui::Ui, s: &mut crate::UiState, look: &Look) {
+    item_with(ui, "Open Recent", false, false, None, look);
+    if s.recent.paths().is_empty() {
+        item_with(ui, "    (none)", false, false, None, look);
+        return;
+    }
+    let mut picked = None;
+    for path in s.recent.paths() {
+        if item(ui, &recent_label(path), false, None, look) {
+            picked = Some(path.clone());
+        }
+    }
+    if let Some(path) = picked {
+        s.recent_pick = Some(path);
+        s.file_cmd = Some(FileCmd::OpenRecent);
+        ui.close();
+    } else if item(ui, "    Clear Menu", false, None, look) {
+        s.recent.clear();
+        ui.close();
+    }
+}
+
 fn menu(ui: &mut egui::Ui, title: &str, items: &[&str], p: &mut Project, s: &mut crate::UiState) {
     let look = look(s.light_menus);
     let title = egui::RichText::new(title).color(look.bar_text);
@@ -335,6 +384,10 @@ fn menu(ui: &mut egui::Ui, title: &str, items: &[&str], p: &mut Project, s: &mut
         for it in items {
             if *it == "-" {
                 separator(ui, look);
+                continue;
+            }
+            if *it == "Open Recent" {
+                recent_items(ui, s, look);
                 continue;
             }
             let key = shortcut(it).map(|k| ui.ctx().format_shortcut(&k));
@@ -446,5 +499,24 @@ mod tests {
         assert_eq!(s.file_cmd, Some(FileCmd::SaveAs));
         assert!(shortcut("Show Library").is_some() && shortcut("Bounce").is_none());
         assert!(GREYED.iter().all(|g| VIEW.contains(g)));
+
+        for (label, cmd) in [
+            ("Save A Copy As…", FileCmd::SaveCopy),
+            ("Revert to Saved", FileCmd::Revert),
+        ] {
+            assert!(FILE.contains(&label), "{label} is in the File menu");
+            apply(label, &mut Project::demo(), &mut s);
+            assert_eq!(s.file_cmd.take(), Some(cmd));
+        }
+    }
+
+    #[test]
+    fn recent_projects_are_listed_with_their_folder() {
+        let label = recent_label(std::path::Path::new("/home/me/Music/Night Drive.prowave"));
+        assert_eq!(label, "    Night Drive  (Music)");
+        assert_eq!(
+            recent_label(std::path::Path::new("Solo.prowave")),
+            "    Solo"
+        );
     }
 }

@@ -17,6 +17,7 @@ mod note_edit;
 mod patches;
 mod piano_roll;
 mod project_io;
+mod recent_files;
 mod theme;
 mod track_icons;
 mod tracks_area;
@@ -51,6 +52,12 @@ pub struct UiState {
     pub file_cmd: Option<file_commands::FileCmd>,
     /// A New / Open waiting for the answer to the "save changes?" prompt.
     pub ask_save: Option<file_commands::FileCmd>,
+    /// True while the "revert to the last saved version?" prompt is showing.
+    pub ask_revert: bool,
+    /// The project picked in File > Open Recent, until `App` has opened it.
+    pub recent_pick: Option<std::path::PathBuf>,
+    /// File > Open Recent. In memory only until `main` loads the saved list.
+    pub recent: recent_files::Recent,
     /// DSP load shown by the LCD's CPU meter (1.0 = full budget); peak-held, falls slowly.
     pub cpu_load: f32,
     /// Light (white) menu bar and menus, toggled by the Smart Controls button.
@@ -74,6 +81,9 @@ impl UiState {
             audition: Vec::new(),
             file_cmd: None,
             ask_save: None,
+            ask_revert: false,
+            recent_pick: None,
+            recent: recent_files::Recent::default(),
             cpu_load: 0.0,
             light_menus: false,
         }
@@ -236,6 +246,7 @@ impl eframe::App for App {
             self.run_file_cmd(cmd, &ctx);
         }
         self.show_save_prompt(&ctx);
+        self.show_revert_prompt(&ctx);
         self.update_title(&ctx);
     }
 }
@@ -297,6 +308,7 @@ fn main() -> eframe::Result {
                 title: String::new(),
             };
             app.ui.status = audio_error;
+            app.ui.recent = recent_files::Recent::load();
             // `prowave song.prowave` opens a project; `prowave song.wav drums.aiff` imports each
             // file as an audio track (into the opened project, if any).
             // `--play` starts the transport on launch; `--piano` opens the Piano Roll.

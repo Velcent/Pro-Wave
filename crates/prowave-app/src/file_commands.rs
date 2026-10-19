@@ -1,5 +1,6 @@
-//! File > New… / Open… / Save / Save As…: native dialogs (rfd), key commands, the "save
-//! changes?" prompt and the window title ("<project> - Tracks", as in Logic).
+//! File > New… / Open… / Open Recent / Save / Save As… / Save A Copy As… / Revert to Saved:
+//! native dialogs (rfd), key commands, the "save changes?" and "revert?" prompts and the window
+//! title ("<project> - Tracks", as in Logic).
 use crate::model::Project;
 use crate::{project_io, App};
 use egui::{Key, KeyboardShortcut, Modifiers};
@@ -13,20 +14,29 @@ pub enum FileCmd {
     Open,
     Save,
     SaveAs,
+    /// Writes the project to another file, which does not become the current one.
+    SaveCopy,
+    /// Reloads the project from its file, after asking.
+    Revert,
+    /// Opens `UiState::recent_pick` (File > Open Recent).
+    OpenRecent,
 }
 
 impl FileCmd {
     /// Save As before Save: egui ignores an extra Shift when matching Cmd+S.
     const ALL: [FileCmd; 4] = [FileCmd::SaveAs, FileCmd::Save, FileCmd::Open, FileCmd::New];
 
-    /// Logic's key commands: Cmd+N, Cmd+O, Cmd+S, Shift+Cmd+S (Ctrl on Windows/Linux).
-    pub fn shortcut(self) -> KeyboardShortcut {
-        match self {
-            FileCmd::New => KeyboardShortcut::new(Modifiers::COMMAND, Key::N),
-            FileCmd::Open => KeyboardShortcut::new(Modifiers::COMMAND, Key::O),
-            FileCmd::Save => KeyboardShortcut::new(Modifiers::COMMAND, Key::S),
-            FileCmd::SaveAs => KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::S),
-        }
+    /// Logic's key commands: Cmd+N, Cmd+O, Cmd+S, Shift+Cmd+S (Ctrl on Windows/Linux). The
+    /// other commands are menu-only.
+    pub fn shortcut(self) -> Option<KeyboardShortcut> {
+        let (modifiers, key) = match self {
+            FileCmd::New => (Modifiers::COMMAND, Key::N),
+            FileCmd::Open => (Modifiers::COMMAND, Key::O),
+            FileCmd::Save => (Modifiers::COMMAND, Key::S),
+            FileCmd::SaveAs => (Modifiers::COMMAND | Modifiers::SHIFT, Key::S),
+            FileCmd::SaveCopy | FileCmd::Revert | FileCmd::OpenRecent => return None,
+        };
+        Some(KeyboardShortcut::new(modifiers, key))
     }
 
     /// The File menu entry that runs this command.
@@ -36,6 +46,8 @@ impl FileCmd {
             "Open…" => Some(FileCmd::Open),
             "Save" => Some(FileCmd::Save),
             "Save As…" => Some(FileCmd::SaveAs),
+            "Save A Copy As…" => Some(FileCmd::SaveCopy),
+            "Revert to Saved" => Some(FileCmd::Revert),
             _ => None,
         }
     }
@@ -43,9 +55,10 @@ impl FileCmd {
 
 /// The file command whose key command was pressed this frame, if any (consumes the keys).
 pub fn pressed(ctx: &egui::Context) -> Option<FileCmd> {
-    FileCmd::ALL
-        .into_iter()
-        .find(|c| ctx.input_mut(|i| i.consume_shortcut(&c.shortcut())))
+    FileCmd::ALL.into_iter().find(|c| {
+        c.shortcut()
+            .is_some_and(|s| ctx.input_mut(|i| i.consume_shortcut(&s)))
+    })
 }
 
 /// What gets saved, minus state that changes on its own (playhead, selected track), so that
@@ -70,10 +83,13 @@ enum Answer {
 }
 
 impl App {
-    /// Runs a File menu command. New / Open first ask what to do with unsaved changes.
+    /// Runs a File menu command. New / Open / Open Recent first ask what to do with unsaved
+    /// changes, and Revert asks before throwing them away.
     pub fn run_file_cmd(&mut self, cmd: FileCmd, ctx: &egui::Context) {
-        let discards = matches!(cmd, FileCmd::New | FileCmd::Open);
-        if discards && content(&self.project) != self.saved {
+        let discards = matches!(cmd, FileCmd::New | FileCmd::Open | FileCmd::OpenRecent);
+        if cmd == FileCmd::Revert {
+            self.request_revert();
+        } else if discards && content(&self.project) != self.saved {
             self.ui.ask_save = Some(cmd);
         } else {
             self.do_file_cmd(cmd, ctx);
@@ -95,6 +111,15 @@ impl App {
             FileCmd::SaveAs => {
                 self.save_as();
             }
+            FileCmd::SaveCopy => {
+                self.save_copy();
+            }
+            FileCmd::OpenRecent => {
+                if let Some(path) = self.ui.recent_pick.take() {
+                    self.open(&path, ctx);
+                }
+            }
+            FileCmd::Revert => self.revert(ctx),
         }
     }
 
@@ -143,8 +168,67 @@ impl App {
         };
         if proceed {
             self.do_file_cmd(cmd, ctx);
+        } else {
+            self.ui.recent_pick = None;
         }
         ctx.request_repaint();
+    }
+
+    /// The "revert to the last saved version?" prompt, drawn like the save prompt.
+    pub fn show_revert_prompt(&mut self, ctx: &egui::Context) {
+        if !self.ui.ask_revert {
+            return;
+        }
+        let mut answer = None;
+        let modal = egui::Modal::new(egui::Id::unique(("file", "revert_prompt"))).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.heading("Pro Wave");
+            ui.add_space(6.0);
+            ui.label(format!(
+                "Do you want to revert the project \"{}\" to the last saved version?",
+                self.project.name
+            ));
+            ui.label("All changes made since it was saved will be lost.");
+            ui.add_space(10.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Revert").clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        if modal.should_close() && answer.is_none() {
+            answer = Some(false);
+        }
+        let Some(revert) = answer else {
+            return;
+        };
+        self.ui.ask_revert = false;
+        if revert {
+            self.revert(ctx);
+        }
+        ctx.request_repaint();
+    }
+
+    /// Revert needs a saved file and something to throw away; otherwise it says why not.
+    fn request_revert(&mut self) {
+        if self.path.is_none() {
+            self.ui.status =
+                Some("nothing to revert to: the project has not been saved yet".into());
+        } else if content(&self.project) == self.saved {
+            self.ui.status = Some("no unsaved changes to revert".into());
+        } else {
+            self.ui.ask_revert = true;
+        }
+    }
+
+    /// Reloads the project from its file, dropping unsaved changes (no prompt).
+    fn revert(&mut self, ctx: &egui::Context) {
+        if let Some(path) = self.path.clone() {
+            self.open(&path, ctx);
+        }
     }
 
     /// Opens `path`, replacing the current project (no prompt; callers ask first).
@@ -152,11 +236,15 @@ impl App {
         match project_io::open_project(path, ctx) {
             Ok((p, warnings)) => {
                 self.replace(p, Some(path.to_path_buf()));
+                self.ui.recent.add(path);
                 if !warnings.is_empty() {
                     self.ui.status = Some(format!("missing media: {}", warnings.join(", ")));
                 }
             }
-            Err(e) => self.ui.status = Some(format!("cannot open {}: {e}", path.display())),
+            Err(e) => {
+                self.ui.recent.remove(path);
+                self.ui.status = Some(format!("cannot open {}: {e}", path.display()));
+            }
         }
     }
 
@@ -180,12 +268,41 @@ impl App {
         }
     }
 
+    /// Save A Copy As…: writes the project elsewhere and keeps working in the current file.
+    fn save_copy(&mut self) -> bool {
+        let name = format!("{} copy.{}", self.project.name, prowave_project::EXTENSION);
+        match dialog()
+            .set_title("Save A Copy As")
+            .set_file_name(name)
+            .save_file()
+        {
+            Some(path) => self.save_copy_to(&path),
+            None => false,
+        }
+    }
+
+    /// Writes the project to `path` without making it the current file: the title, the unsaved
+    /// state and Open Recent stay as they were.
+    pub fn save_copy_to(&mut self, path: &Path) -> bool {
+        match project_io::save_project(&self.project, path) {
+            Ok(path) => {
+                self.ui.status = Some(format!("saved a copy: {}", path.display()));
+                true
+            }
+            Err(e) => {
+                self.ui.status = Some(format!("cannot save {}: {e}", path.display()));
+                false
+            }
+        }
+    }
+
     pub fn save_to(&mut self, path: &Path) -> bool {
         match project_io::save_project(&self.project, path) {
             Ok(path) => {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     self.project.name = stem.to_string();
                 }
+                self.ui.recent.add(&path);
                 self.path = Some(path);
                 self.saved = content(&self.project);
                 self.ui.status = None;
@@ -250,9 +367,15 @@ mod tests {
     fn menu_entries_and_key_commands() {
         assert_eq!(FileCmd::from_menu("Save As…"), Some(FileCmd::SaveAs));
         assert_eq!(FileCmd::from_menu("Bounce"), None);
-        let save_as = FileCmd::SaveAs.shortcut();
+        let save_as = FileCmd::SaveAs.shortcut().unwrap();
         assert!(save_as.modifiers.shift && save_as.logical_key == Key::S);
-        assert!(!FileCmd::Save.shortcut().modifiers.shift);
+        assert!(!FileCmd::Save.shortcut().unwrap().modifiers.shift);
+        assert_eq!(
+            FileCmd::from_menu("Save A Copy As…"),
+            Some(FileCmd::SaveCopy)
+        );
+        assert_eq!(FileCmd::from_menu("Revert to Saved"), Some(FileCmd::Revert));
+        assert!(FileCmd::SaveCopy.shortcut().is_none() && FileCmd::OpenRecent.shortcut().is_none());
     }
 
     #[test]
@@ -331,5 +454,102 @@ mod tests {
         );
         assert_eq!(a.project.tracks.len(), tracks);
         assert!(a.ui.status.is_some());
+    }
+
+    #[test]
+    fn saving_and_opening_feed_open_recent_and_a_broken_file_is_forgotten() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut a = app();
+        assert!(a.save_to(&dir.path().join("One")));
+        assert!(a.save_to(&dir.path().join("Two")));
+        let (one, two) = (
+            dir.path().join("One.prowave"),
+            dir.path().join("Two.prowave"),
+        );
+        assert_eq!(a.ui.recent.paths(), [two.clone(), one.clone()]);
+
+        a.open(&one, &ctx);
+        assert_eq!(a.ui.recent.paths()[0], one);
+
+        let bad = dir.path().join("Bad.prowave");
+        std::fs::write(&bad, b"not a zip").unwrap();
+        a.ui.recent.add(&bad);
+        a.open(&bad, &ctx);
+        assert!(!a.ui.recent.paths().contains(&bad));
+        assert!(a.ui.status.as_deref().unwrap().starts_with("cannot open"));
+    }
+
+    #[test]
+    fn open_recent_asks_before_discarding_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut a = app();
+        assert!(a.save_to(&dir.path().join("Saved")));
+        let file = dir.path().join("Saved.prowave");
+
+        a.project.tempo = 61.0;
+        a.ui.recent_pick = Some(file.clone());
+        a.run_file_cmd(FileCmd::OpenRecent, &ctx);
+        assert_eq!(a.ui.ask_save, Some(FileCmd::OpenRecent));
+        assert_eq!(a.project.tempo, 61.0, "not replaced until answered");
+
+        // "Don't Save": the pending project opens and the pick is used up.
+        a.ui.ask_save = None;
+        a.do_file_cmd(FileCmd::OpenRecent, &ctx);
+        assert_ne!(a.project.tempo, 61.0);
+        assert!(a.ui.recent_pick.is_none());
+    }
+
+    #[test]
+    fn revert_needs_a_saved_file_and_a_confirmed_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut a = app();
+        a.run_file_cmd(FileCmd::Revert, &ctx);
+        assert!(!a.ui.ask_revert);
+        assert!(a.ui.status.as_deref().unwrap().contains("not been saved"));
+
+        assert!(a.save_to(&dir.path().join("Song")));
+        a.run_file_cmd(FileCmd::Revert, &ctx);
+        assert!(!a.ui.ask_revert);
+        assert!(a
+            .ui
+            .status
+            .as_deref()
+            .unwrap()
+            .contains("no unsaved changes"));
+
+        let saved_tempo = a.project.tempo;
+        a.project.tempo += 10.0;
+        a.run_file_cmd(FileCmd::Revert, &ctx);
+        assert!(a.ui.ask_revert, "asks before throwing changes away");
+        assert_eq!(a.project.tempo, saved_tempo + 10.0);
+
+        a.revert(&ctx);
+        assert_eq!(a.project.tempo, saved_tempo);
+        assert_eq!(content(&a.project), a.saved);
+    }
+
+    #[test]
+    fn save_a_copy_leaves_the_current_project_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app();
+        assert!(a.save_to(&dir.path().join("Original")));
+        let (path, name) = (a.path.clone(), a.project.name.clone());
+        let recent = a.ui.recent.paths().to_vec();
+
+        a.project.tempo += 5.0;
+        assert!(a.save_copy_to(&dir.path().join("Backup")));
+        let copy = dir.path().join("Backup.prowave");
+        assert!(copy.is_file());
+        assert_eq!((a.path.clone(), a.project.name.clone()), (path, name));
+        assert_ne!(content(&a.project), a.saved, "still has unsaved changes");
+        assert_eq!(a.ui.recent.paths(), recent.as_slice());
+
+        // The copy holds the current state, tempo included.
+        let (opened, _) = project_io::open_project(&copy, &egui::Context::default()).unwrap();
+        assert_eq!(opened.tempo, a.project.tempo);
+        assert_eq!(opened.name, "Backup");
     }
 }
