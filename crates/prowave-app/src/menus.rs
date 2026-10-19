@@ -3,7 +3,7 @@
 //! are greyed out. The Smart Controls button in the control bar switches the bar and its
 //! menus between the dark look and the light (white) macOS look (`UiState::light_menus`).
 use crate::file_commands::FileCmd;
-use crate::model::Project;
+use crate::model::{Project, TrackKind};
 use crate::Bottom;
 use egui::{pos2, vec2, Align2, Color32, FontId, Key, KeyboardShortcut, Modifiers, Sense, Stroke};
 
@@ -46,6 +46,7 @@ const EDIT: &[&str] = &[
 ];
 const TRACK: &[&str] = &[
     "New",
+    "New Aux Track",
     "Rename Track",
     "Delete Track",
     "-",
@@ -262,6 +263,9 @@ fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
             } else {
                 Bottom::PianoRoll
             }
+        }
+        "New Aux Track" => {
+            p.add_track(TrackKind::Aux);
         }
         "Go to Beginning" => p.position_beats = 0.0,
         "Record" => p.recording = !p.recording,
@@ -508,6 +512,17 @@ mod tests {
             apply(label, &mut Project::demo(), &mut s);
             assert_eq!(s.file_cmd.take(), Some(cmd));
         }
+    }
+
+    #[test]
+    fn new_aux_track_adds_an_aux_track() {
+        let (mut p, mut s) = (Project::demo(), crate::UiState::new());
+        assert!(TRACK.contains(&"New Aux Track"));
+        let n = p.tracks.len();
+        apply("New Aux Track", &mut p, &mut s);
+        assert_eq!(p.tracks.len(), n + 1);
+        assert_eq!(p.tracks[n].kind, TrackKind::Aux);
+        assert_eq!(p.selected_track, n);
     }
 
     #[test]

@@ -388,6 +388,42 @@ impl Project {
         self.sig.0.max(1) as f64 * self.beat_unit()
     }
 
+    /// Appends a new track of `kind` (named "Aux 1", "Inst 3"...), selects it and tells the
+    /// engine the song changed. Returns its index.
+    pub fn add_track(&mut self, kind: TrackKind) -> usize {
+        let n = self.tracks.iter().filter(|t| t.kind == kind).count() + 1;
+        let name = match kind {
+            TrackKind::Instrument => format!("Inst {n}"),
+            TrackKind::Audio => format!("Audio {n}"),
+            TrackKind::Drummer => format!("Drummer {n}"),
+            TrackKind::Aux => format!("Aux {n}"),
+            TrackKind::Folder => format!("Folder {n}"),
+            TrackKind::Bus => format!("Bus {n}"),
+            TrackKind::Output => format!("Output {n}"),
+        };
+        self.tracks.push(Track::new(name, kind));
+        self.selected_track = self.tracks.len() - 1;
+        self.song_rev += 1;
+        self.selected_track
+    }
+
+    /// The channel name the Inspector shows for track `i`: "Audio 2", "Aux 1" or "Inst 3",
+    /// counting the tracks of the same class up to and including it.
+    pub fn channel_name(&self, i: usize) -> String {
+        let class = |k: TrackKind| match k {
+            TrackKind::Audio => 0,
+            TrackKind::Aux => 1,
+            _ => 2,
+        };
+        let c = class(self.tracks[i].kind);
+        let nth = self.tracks[..=i]
+            .iter()
+            .filter(|t| class(t.kind) == c)
+            .count();
+        let label = ["Audio", "Aux", "Inst"][c];
+        format!("{label} {nth}")
+    }
+
     /// Repairs folder nesting: a track can sit at most one level below the track before it,
     /// and only when that one is a `Folder`. Run after loading a file that may be hand-edited.
     pub fn normalize_nesting(&mut self) {
@@ -551,6 +587,43 @@ mod tests {
         let got: Vec<u8> = p.tracks.iter().map(|t| t.indent).collect();
         assert_eq!(got, [0, 0, 1, 1, 2, 2]);
     }
+    #[test]
+    fn added_tracks_are_named_per_kind_selected_and_announced() {
+        let mut p = Project::demo();
+        let (n, rev) = (p.tracks.len(), p.song_rev);
+        let aux = p.add_track(TrackKind::Aux);
+        assert_eq!((aux, p.selected_track, p.tracks.len()), (n, n, n + 1));
+        assert_eq!(p.tracks[aux].name, "Aux 1");
+        assert_eq!(p.tracks[aux].kind, TrackKind::Aux);
+        assert!(p.tracks[aux].regions.is_empty());
+        assert_ne!(p.song_rev, rev, "the engine is told the track list changed");
+
+        p.add_track(TrackKind::Aux);
+        assert_eq!(p.tracks.last().unwrap().name, "Aux 2");
+        p.add_track(TrackKind::Instrument);
+        assert_eq!(
+            p.tracks.last().unwrap().name,
+            "Inst 4",
+            "the demo has 3 instruments"
+        );
+    }
+
+    #[test]
+    fn channel_names_count_within_their_class() {
+        let mut p = Project::demo();
+        let a1 = p.add_track(TrackKind::Aux);
+        let a2 = p.add_track(TrackKind::Aux);
+        let audio = p
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Audio)
+            .unwrap();
+        assert_eq!(p.channel_name(a1), "Aux 1");
+        assert_eq!(p.channel_name(a2), "Aux 2");
+        assert_eq!(p.channel_name(audio), "Audio 1");
+        assert_eq!(p.channel_name(0), "Inst 1");
+    }
+
     #[test]
     fn an_invalid_denominator_steps_from_quarter_notes() {
         let mut p = Project::demo();

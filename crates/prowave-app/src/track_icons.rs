@@ -20,13 +20,21 @@ pub enum IconKind {
     Guitar,
     Mic,
     Strings,
+    /// Auxiliary channel strip: lines running into a bus.
+    Aux,
+    /// Folder (track stack).
+    Folder,
 }
 
 /// Icon drawn for a track (header, Library, inspector). As in Logic, a software instrument
 /// track shows the generic green note tile until a Library patch is loaded; other tracks use
 /// [`icon_kind`]. (The sound is still chosen from the name, see `patches::synth_patch`.)
 pub fn track_icon(t: &Track) -> IconKind {
-    if t.kind == TrackKind::Instrument && t.category.is_none() {
+    if t.kind == TrackKind::Aux {
+        IconKind::Aux
+    } else if t.kind == TrackKind::Folder {
+        IconKind::Folder
+    } else if t.kind == TrackKind::Instrument && t.category.is_none() {
         IconKind::Note
     } else {
         icon_kind(t)
@@ -240,6 +248,8 @@ pub fn draw_icon(g: &Painter, r: Rect, kind: IconKind) {
         IconKind::Guitar => guitar(&pen, false),
         IconKind::Mic => mic(&pen),
         IconKind::Strings => violin(&pen),
+        IconKind::Aux => aux(&pen),
+        IconKind::Folder => folder(&pen),
     }
 }
 
@@ -310,6 +320,48 @@ fn note_tile(p: &Pen) {
     beam.push((6.761, -5.56));
     beam.push((-4.532, -3.256));
     fill(&beam);
+}
+
+/// Aux: a dark teal tile with three bus lines that gather into one arrow.
+fn aux(p: &Pen) {
+    p.rect(
+        -16.0,
+        -12.0,
+        16.0,
+        12.0,
+        rgb(0x2a, 0x55, 0x58),
+        rgb(0x1a, 0x37, 0x3a),
+    );
+    let teal = rgb(0x4f, 0xd1, 0xd1);
+    for y in [-6.0, 0.0, 6.0] {
+        p.line(&[(-11.0, y), (3.0, y)], 1.6, teal);
+    }
+    p.line(&[(3.0, -6.0), (8.0, 0.0), (3.0, 6.0)], 1.6, teal);
+    p.line(&[(8.0, 0.0), (13.0, 0.0)], 1.6, teal);
+}
+
+/// Folder: a grey-blue folder with a tab.
+fn folder(p: &Pen) {
+    p.poly(
+        &[
+            (-15.0, -5.0),
+            (-15.0, -11.0),
+            (-5.0, -11.0),
+            (-2.0, -7.0),
+            (15.0, -7.0),
+            (15.0, -5.0),
+        ],
+        rgb(0xa9, 0xae, 0xbd),
+        rgb(0x8a, 0x8f, 0x9f),
+    );
+    p.rect(
+        -15.0,
+        -6.0,
+        15.0,
+        11.0,
+        rgb(0xc4, 0xc8, 0xd4),
+        rgb(0x7f, 0x84, 0x94),
+    );
 }
 
 fn waveform(p: &Pen) {
@@ -816,6 +868,19 @@ mod tests {
                 IconKind::Bass,
                 IconKind::Mic
             ]
+        );
+    }
+
+    #[test]
+    fn aux_and_folder_tracks_have_their_own_icons() {
+        use crate::model::{Track, TrackKind};
+        // Not the note tile, whatever the name or patch category says.
+        let mut aux = Track::new("Piano Reverb", TrackKind::Aux);
+        aux.category = Some("Piano");
+        assert_eq!(track_icon(&aux), IconKind::Aux);
+        assert_eq!(
+            track_icon(&Track::new("Drums", TrackKind::Folder)),
+            IconKind::Folder
         );
     }
 

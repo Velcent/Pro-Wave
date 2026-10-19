@@ -682,31 +682,6 @@ fn zoom_to_fit(p: &Project, v: &mut TracksView, lanes_w: f32) {
     }
 }
 
-fn new_track(p: &mut Project, name: String) {
-    p.tracks.push(Track {
-        name,
-        kind: TrackKind::Instrument,
-        color: Color32::from_rgb(0x4e, 0xb0, 0x4a),
-        mute: false,
-        solo: false,
-        rec: false,
-        monitor: false,
-        volume_db: 0.0,
-        pan: 0.0,
-        inserts: vec![],
-        instrument: Some("Sampler"),
-        regions: vec![],
-        params: crate::model::TrackParams::default(),
-        category: None,
-        send: crate::model::SendSlot::default(),
-        height: 1.0,
-        indent: 0,
-        folded: false,
-    });
-    p.selected_track = p.tracks.len() - 1;
-    p.song_rev += 1;
-}
-
 // ------------------------------------------------------------------ drawing
 
 #[allow(clippy::too_many_arguments)]
@@ -935,16 +910,19 @@ fn header(ui: &Ui, g: &Painter, p: &mut Project, i: usize, hdr: Rect) {
             t.solo = !t.solo;
         }
         bx += 21.0;
-        if header_button(
-            ui,
-            g,
-            Rect::from_min_size(pos2(bx, by), size),
-            (i, "r"),
-            "R",
-            t.rec,
-            REC_ON,
-            selected,
-        ) {
+        // Aux and Folder tracks hold no regions, so there is nothing to record into.
+        if t.kind.has_regions()
+            && header_button(
+                ui,
+                g,
+                Rect::from_min_size(pos2(bx, by), size),
+                (i, "r"),
+                "R",
+                t.rec,
+                REC_ON,
+                selected,
+            )
+        {
             t.rec = !t.rec;
         }
         if audio {
@@ -1264,8 +1242,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         stroke(TEXT),
     );
     if pr.clicked() {
-        let n = p.tracks.len() + 1;
-        new_track(p, format!("Inst {n}"));
+        p.add_track(TrackKind::Instrument);
     }
     let dup = Rect::from_center_size(
         pos2(plus.right() + 18.0, corner.center().y),

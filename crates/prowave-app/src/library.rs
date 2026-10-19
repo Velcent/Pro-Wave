@@ -288,6 +288,10 @@ fn load_patch(p: &mut Project, v: &mut LibraryView, cat: usize, patch: usize) {
     let Some(t) = p.tracks.get_mut(ti) else {
         return;
     };
+    // A folder only groups tracks; there is no channel strip to load a patch into.
+    if t.kind == TrackKind::Folder {
+        return;
+    }
     if v.saved.as_ref().is_none_or(|s| s.track != ti) {
         v.saved = Some(Saved {
             track: ti,
@@ -300,7 +304,9 @@ fn load_patch(p: &mut Project, v: &mut LibraryView, cat: usize, patch: usize) {
     t.name = (*name).to_string();
     t.category = Some(c.name);
     t.inserts = c.fx.to_vec();
-    if t.kind != TrackKind::Audio {
+    // Only software instruments get an instrument: audio tracks keep their input and an aux
+    // track its bus.
+    if matches!(t.kind, TrackKind::Instrument | TrackKind::Drummer) {
         t.instrument = c.instrument;
     }
     v.loaded = Some((cat, patch));
@@ -666,6 +672,22 @@ mod tests {
         assert_eq!((t.name.clone(), t.instrument, t.inserts.clone()), before);
         assert_eq!(t.category, None);
         assert!(v.loaded.is_none());
+    }
+
+    #[test]
+    fn aux_tracks_take_the_channel_strip_but_not_an_instrument_and_folders_nothing() {
+        let mut p = Project::demo();
+        let aux = p.add_track(TrackKind::Aux);
+        let mut v = LibraryView::default();
+        load_patch(&mut p, &mut v, category("Guitar"), 0);
+        assert_eq!(p.tracks[aux].instrument, None);
+        assert_eq!(p.tracks[aux].category, Some("Guitar"));
+
+        let folder = p.add_track(TrackKind::Folder);
+        let name = p.tracks[folder].name.clone();
+        load_patch(&mut p, &mut v, category("Bass"), 0);
+        assert_eq!(p.tracks[folder].name, name);
+        assert_eq!(p.tracks[folder].category, None);
     }
 
     #[test]

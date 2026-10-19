@@ -681,6 +681,18 @@ pub fn channel_strip(
         (Some(TrackKind::Instrument | TrackKind::Drummer), Some(inst)) => {
             slot(g, input_r, inst, PLUGIN_BLUE, Color32::WHITE)
         }
+        // An aux strip's input is the bus it listens to: Aux 1 takes Bus 1, and so on. (The
+        // engine does not route buses yet, so this is the strip's setting, not a signal path.)
+        (Some(TrackKind::Aux), _) => {
+            let n = match key {
+                StripKey::Track(i) => p.tracks[..=i]
+                    .iter()
+                    .filter(|t| t.kind == TrackKind::Aux)
+                    .count(),
+                _ => 1,
+            };
+            slot(g, input_r, &format!("Bus {n}"), PLUGIN_BLUE, Color32::WHITE);
+        }
         (Some(TrackKind::Audio), _) => {
             slot(g, input_r, "Input 1", SLOT_GRAY, TEXT);
             g.circle_stroke(
@@ -1028,6 +1040,20 @@ fn toolbar(ui: &Ui, s: &mut UiState, bar: Rect) {
     }
 }
 
+/// Whether a strip of `kind` is shown with the toolbar's filter buttons set as `filters`
+/// (Audio, Inst, Aux, Bus, Input, Output, Master/VCA, MIDI).
+fn strip_visible(kind: TrackKind, filters: &[bool; 8]) -> bool {
+    match kind {
+        TrackKind::Audio => filters[0],
+        TrackKind::Instrument | TrackKind::Drummer => filters[1],
+        TrackKind::Aux => filters[2],
+        TrackKind::Bus => filters[3],
+        TrackKind::Output => filters[5],
+        // A folder is only a way to group tracks; it has no channel strip.
+        TrackKind::Folder => false,
+    }
+}
+
 pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
     let area = ui.available_rect_before_wrap();
     ui.allocate_rect(area, Sense::hover());
@@ -1043,22 +1069,13 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
 
     // Which strips, in order.
     let filters = v.filters;
-    let kind_visible = |k: TrackKind| match k {
-        TrackKind::Audio => filters[0],
-        TrackKind::Instrument | TrackKind::Drummer => filters[1],
-        TrackKind::Aux => filters[2],
-        TrackKind::Bus => filters[3],
-        TrackKind::Output => filters[5],
-        // A folder is only a way to group tracks; it has no channel strip.
-        TrackKind::Folder => false,
-    };
     let mut keys: Vec<StripKey> = if p.tracks.is_empty() {
         Vec::new()
     } else {
         match v.mode {
             MixerMode::Single => vec![StripKey::Track(p.selected_track.min(p.tracks.len() - 1))],
             MixerMode::Tracks | MixerMode::All => (0..p.tracks.len())
-                .filter(|i| kind_visible(p.tracks[*i].kind))
+                .filter(|i| strip_visible(p.tracks[*i].kind, &filters))
                 .map(StripKey::Track)
                 .collect(),
         }
@@ -1129,6 +1146,27 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
             &r,
             "mixer",
             NameStyle::Coloured,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_follow_the_filter_buttons_and_folders_have_none() {
+        let all = [true; 8];
+        let mut only_aux = [false; 8];
+        only_aux[2] = true;
+        assert!(strip_visible(TrackKind::Aux, &all));
+        assert!(strip_visible(TrackKind::Aux, &only_aux));
+        assert!(!strip_visible(TrackKind::Audio, &only_aux));
+        assert!(!strip_visible(TrackKind::Instrument, &only_aux));
+        assert!(!strip_visible(TrackKind::Aux, &[false; 8]));
+        assert!(
+            !strip_visible(TrackKind::Folder, &all),
+            "a folder has no channel strip"
         );
     }
 }

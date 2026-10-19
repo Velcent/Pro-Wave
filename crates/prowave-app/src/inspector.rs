@@ -470,15 +470,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
             track_icon(&p.tracks[ti]),
         );
         y += 30.0;
-        let nth = p.tracks[..=ti]
-            .iter()
-            .filter(|t| (t.kind == TrackKind::Audio) == audio)
-            .count();
-        let channel = if audio {
-            format!("Audio {nth}")
-        } else {
-            format!("Inst {nth}")
-        };
+        let channel = p.channel_name(ti);
         label(&g, left, y, "Channel:", false);
         popup(
             ui,
