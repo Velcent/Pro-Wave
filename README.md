@@ -1,9 +1,8 @@
 # ProWave
 
-An open-source, clip-launching DAW in pure Rust, comparable in workflow to Ableton Live.
+An open-source, clip-launching DAW in pure Rust, comparable in workflow to Logic Pro.
 
-ProWave is a fork of [Suhina](https://github.com/suhina-daw/suhina-daw) (itself called Loopwerk
-until October 2026), under the same licence, GPL-3.0-or-later; the code it started from is the
+ProWave, under the same licence, GPL-3.0-or-later; the code it started from is the
 work of the Suhina contributors (`NOTICE`). Settings kept under the Loopwerk name carry over on the
 first start. <!-- rename_prowave: keep -->
 
