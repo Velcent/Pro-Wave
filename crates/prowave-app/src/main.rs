@@ -13,11 +13,13 @@ mod library;
 mod menus;
 mod mixer;
 mod model;
+mod native_menu;
 mod note_edit;
 mod patches;
 mod piano_roll;
 mod project_io;
 mod recent_files;
+mod start_screen;
 mod theme;
 mod track_icons;
 mod tracks_area;
@@ -62,6 +64,8 @@ pub struct UiState {
     pub cpu_load: f32,
     /// Light (white) menu bar and menus, toggled by the Smart Controls button.
     pub light_menus: bool,
+    /// The Project Chooser, while it covers the window (File > New from Template…).
+    pub chooser: Option<start_screen::Chooser>,
 }
 
 impl UiState {
@@ -86,6 +90,7 @@ impl UiState {
             recent: recent_files::Recent::default(),
             cpu_load: 0.0,
             light_menus: false,
+            chooser: None,
         }
     }
 
@@ -112,6 +117,8 @@ struct App {
     saved: prowave_project::ProjectDoc,
     /// Window title last sent to the viewport.
     title: String,
+    /// macOS: the menus in the system menu bar (elsewhere they are drawn in the window).
+    native_menu: Option<native_menu::NativeMenu>,
 }
 
 impl App {
@@ -126,12 +133,58 @@ impl App {
     }
 }
 
+impl App {
+    /// The window while the Project Chooser is up: the menu bar and the chooser, with the
+    /// File key commands and prompts still working.
+    fn chooser_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if let Some(menu) = self.native_menu.as_mut() {
+            menu.update(ctx, &mut self.project, &mut self.ui);
+        }
+        if let Some(cmd) = file_commands::pressed(ctx) {
+            self.ui.file_cmd = Some(cmd);
+        }
+        if let Some(sync) = self.sync.as_mut() {
+            sync.sync(&mut self.project);
+        }
+        // Audio files dropped on the chooser go into the open project.
+        let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
+        if !dropped.is_empty() {
+            self.ui.chooser = None;
+            for path in dropped {
+                self.import(&path, ctx);
+            }
+        }
+        top_bar(ui, &mut self.project, &mut self.ui);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new())
+            .show(ui, |ui| start_screen::show(ui, &mut self.ui));
+        if let Some(cmd) = self.ui.file_cmd.take() {
+            self.run_file_cmd(cmd, ctx);
+        }
+        self.show_save_prompt(ctx);
+        self.update_title(ctx);
+    }
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let dt = ctx.input(|i| i.stable_dt) as f64;
+        if self.ui.chooser.is_some() {
+            self.chooser_ui(ui, &ctx);
+            return;
+        }
         if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             self.project.playing = !self.project.playing;
+        }
+        if let Some(menu) = self.native_menu.as_mut() {
+            menu.update(&ctx, &mut self.project, &mut self.ui);
         }
         if let Some(cmd) = file_commands::pressed(&ctx) {
             self.ui.file_cmd = Some(cmd);
@@ -175,11 +228,7 @@ impl eframe::App for App {
         let p = &mut self.project;
         let s = &mut self.ui;
 
-        let menu_frame =
-            egui::Frame::side_top_panel(ui.style()).fill(menus::bar_fill(s.light_menus));
-        egui::Panel::top("menu")
-            .frame(menu_frame)
-            .show(ui, |ui| menus::menu_bar(ui, p, s));
+        top_bar(ui, p, s);
         egui::Panel::top("control")
             .exact_size(58.0)
             .frame(egui::Frame::new().fill(egui::Color32::from_gray(0x47)))
@@ -251,6 +300,21 @@ impl eframe::App for App {
     }
 }
 
+/// The in-window menu bar; on macOS, where the menus are in the system menu bar, only a line
+/// for errors and warnings while there is one.
+fn top_bar(ui: &mut egui::Ui, p: &mut Project, s: &mut UiState) {
+    let frame = egui::Frame::side_top_panel(ui.style()).fill(menus::bar_fill(s.light_menus));
+    if menus::IN_WINDOW {
+        egui::Panel::top("menu")
+            .frame(frame)
+            .show(ui, |ui| menus::menu_bar(ui, p, s));
+    } else if menus::has_status(p, s) {
+        egui::Panel::top("status")
+            .frame(frame)
+            .show(ui, |ui| ui.horizontal(|ui| menus::status_line(ui, p, s)));
+    }
+}
+
 /// Log to stderr; `RUST_LOG` overrides the default (warnings, plus info from ProWave; the
 /// Vulkan loader's harmless layer-manifest warnings from `wgpu_hal` are hidden).
 fn init_logging() {
@@ -289,7 +353,12 @@ fn main() -> eframe::Result {
         opts,
         Box::new(|cc| {
             theme::apply(&cc.egui_ctx);
-            let project = Project::demo();
+            // The very first start shows the demo song; later starts begin clean.
+            let project = if recent_files::take_first_launch() {
+                Project::demo()
+            } else {
+                Project::empty()
+            };
             let mut audio_error = None;
             let sync = match prowave_engine::Engine::start() {
                 Ok(e) => Some(engine_sync::EngineSync::new(e, &project)),
@@ -306,7 +375,12 @@ fn main() -> eframe::Result {
                 sync,
                 path: None,
                 title: String::new(),
+                native_menu: None,
             };
+            #[cfg(target_os = "macos")]
+            {
+                app.native_menu = Some(native_menu::NativeMenu::install(&cc.egui_ctx));
+            }
             app.ui.status = audio_error;
             app.ui.recent = recent_files::Recent::load();
             // `prowave song.prowave` opens a project; `prowave song.wav drums.aiff` imports each

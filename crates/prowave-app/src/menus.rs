@@ -171,8 +171,38 @@ const WINDOW: &[&str] = &[
 ];
 const HELP: &[&str] = &["Quick Help", "Logic-style Key Commands…", "About Pro Wave"];
 
+/// The menus in bar order, used by the in-window bar and the macOS menu bar.
+pub(crate) const MENUS: [(&str, &[&str]); 9] = [
+    ("File", FILE),
+    ("Edit", EDIT),
+    ("Track", TRACK),
+    ("Navigate", NAVIGATE),
+    ("Record", RECORD),
+    ("Mix", MIX),
+    ("View", VIEW),
+    ("Window", WINDOW),
+    ("Help", HELP),
+];
+
 /// View entries Logic greys out while there is nothing to act on.
-const GREYED: &[&str] = &["Create Track Automation", "Convert Automation"];
+pub(crate) const GREYED: &[&str] = &["Create Track Automation", "Convert Automation"];
+
+/// Entries that can show a check mark (see [`checked`]).
+pub(crate) const CHECKABLE: &[&str] = &[
+    "Show Piano Roll",
+    "Show Mixer",
+    "Show Library",
+    "Show Inspector",
+    "Show Toolbar",
+    "Show Track Header",
+    "Show Ruler",
+    "Show Colors",
+    "Show Grid",
+];
+
+/// Whether the menu bar is drawn inside the window. On macOS the menus go in the system menu
+/// bar at the top of the screen instead (`native_menu`).
+pub const IN_WINDOW: bool = !cfg!(target_os = "macos");
 
 /// Colours of one menu look.
 struct Look {
@@ -237,7 +267,7 @@ fn shortcut(label: &str) -> Option<KeyboardShortcut> {
 }
 
 /// Whether `label` shows a check mark (what it shows is visible).
-fn checked(label: &str, s: &crate::UiState) -> bool {
+pub(crate) fn checked(label: &str, s: &crate::UiState) -> bool {
     match label {
         "Show Piano Roll" => s.bottom == Bottom::PianoRoll,
         "Show Mixer" => s.show_mixer && s.bottom == Bottom::Mixer,
@@ -256,7 +286,7 @@ fn forget_region_selection(s: &mut crate::UiState) {
 }
 
 /// Runs a menu entry (File entries are queued in `UiState::file_cmd` for `App`).
-fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
+pub(crate) fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
     match label {
         "Show Mixer" | "Mixer" => {
             s.show_mixer = !(s.show_mixer && s.bottom == Bottom::Mixer);
@@ -271,6 +301,7 @@ fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
                 Bottom::PianoRoll
             }
         }
+        "New from Template…" => s.chooser = Some(crate::start_screen::Chooser::templates()),
         "New Aux Track" => {
             p.add_track(TrackKind::Aux);
         }
@@ -469,30 +500,35 @@ pub fn menu_bar(ui: &mut egui::Ui, p: &mut Project, s: &mut crate::UiState) {
                 .strong()
                 .color(look(light).bar_text),
         );
-        menu(ui, "File", FILE, p, s);
-        menu(ui, "Edit", EDIT, p, s);
-        menu(ui, "Track", TRACK, p, s);
-        menu(ui, "Navigate", NAVIGATE, p, s);
-        menu(ui, "Record", RECORD, p, s);
-        menu(ui, "Mix", MIX, p, s);
-        menu(ui, "View", VIEW, p, s);
-        menu(ui, "Window", WINDOW, p, s);
-        menu(ui, "Help", HELP, p, s);
-        let warn = if light {
-            Color32::from_rgb(0xb0, 0x5a, 0x00)
-        } else {
-            Color32::from_rgb(0xff, 0xb0, 0x40)
-        };
-        if let Some(msg) = &s.status {
-            ui.colored_label(warn, msg);
+        for (title, items) in MENUS {
+            menu(ui, title, items, p, s);
         }
-        // The engine plays only its first MAX_TRACKS tracks; say so instead of failing silently.
-        let max = prowave_engine::MAX_TRACKS;
-        if p.tracks.len() > max {
-            ui.colored_label(warn, format!("Tracks {}–{} are silent (limit {max})", max + 1, p.tracks.len()))
-                .on_hover_text("The audio engine plays up to 64 tracks. Tracks after that are kept in the project but not played.");
-        }
+        status_line(ui, p, s);
     });
+}
+
+/// Whether [`status_line`] has anything to say.
+pub fn has_status(p: &Project, s: &crate::UiState) -> bool {
+    s.status.is_some() || p.tracks.len() > prowave_engine::MAX_TRACKS
+}
+
+/// The last error or warning, after the menus (or on its own line on macOS, where the menus
+/// are in the system menu bar).
+pub fn status_line(ui: &mut egui::Ui, p: &Project, s: &crate::UiState) {
+    let warn = if s.light_menus {
+        Color32::from_rgb(0xb0, 0x5a, 0x00)
+    } else {
+        Color32::from_rgb(0xff, 0xb0, 0x40)
+    };
+    if let Some(msg) = &s.status {
+        ui.colored_label(warn, msg);
+    }
+    // The engine plays only its first MAX_TRACKS tracks; say so instead of failing silently.
+    let max = prowave_engine::MAX_TRACKS;
+    if p.tracks.len() > max {
+        ui.colored_label(warn, format!("Tracks {}–{} are silent (limit {max})", max + 1, p.tracks.len()))
+            .on_hover_text("The audio engine plays up to 64 tracks. Tracks after that are kept in the project but not played.");
+    }
 }
 
 #[cfg(test)]

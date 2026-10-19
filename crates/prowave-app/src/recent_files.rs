@@ -5,9 +5,14 @@ use std::path::{Path, PathBuf};
 /// How many projects the menu remembers.
 const MAX: usize = 10;
 
-/// `<config folder>/prowave/recent.txt`: %APPDATA% on Windows, ~/Library/Application Support on
-/// macOS, $XDG_CONFIG_HOME or ~/.config elsewhere. `None` when no home folder is known.
+/// `<config folder>/prowave/recent.txt`.
 fn default_file() -> Option<PathBuf> {
+    Some(config_dir()?.join("recent.txt"))
+}
+
+/// `<config folder>/prowave`: %APPDATA% on Windows, ~/Library/Application Support on macOS,
+/// $XDG_CONFIG_HOME or ~/.config elsewhere. `None` when no home folder is known.
+fn config_dir() -> Option<PathBuf> {
     let var = |name: &str| {
         std::env::var_os(name)
             .filter(|v| !v.is_empty())
@@ -20,7 +25,29 @@ fn default_file() -> Option<PathBuf> {
     } else {
         var("XDG_CONFIG_HOME").or_else(|| var("HOME").map(|h| h.join(".config")))?
     };
-    Some(base.join("prowave").join("recent.txt"))
+    Some(base.join("prowave"))
+}
+
+/// True the very first time Pro Wave starts on this computer (it then opens the demo song);
+/// false on every later start, which begins with a clean project. Remembered by an empty
+/// `first-launch-done` file in the config folder. Without a config folder every start is a
+/// later one, so the demo never comes back by surprise.
+pub fn take_first_launch() -> bool {
+    config_dir().is_some_and(|dir| take_first_launch_in(&dir))
+}
+
+fn take_first_launch_in(dir: &Path) -> bool {
+    let marker = dir.join("first-launch-done");
+    if marker.exists() {
+        return false;
+    }
+    if let Err(e) = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&marker, b"")) {
+        tracing::warn!(
+            "cannot remember the first launch in {}: {e}",
+            marker.display()
+        );
+    }
+    true
 }
 
 /// The recent-projects list. `Recent::default()` is an in-memory list that never touches disk
@@ -155,5 +182,14 @@ mod tests {
         let mut r = Recent::from_file(Some(dir.path().to_path_buf()));
         r.add(&touch(dir.path(), "a.prowave"));
         assert_eq!(r.paths().len(), 1);
+    }
+
+    #[test]
+    fn only_the_first_launch_is_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("prowave");
+        assert!(take_first_launch_in(&config), "nothing remembered yet");
+        assert!(!take_first_launch_in(&config));
+        assert!(!take_first_launch_in(&config));
     }
 }

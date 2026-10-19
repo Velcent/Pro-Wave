@@ -2,6 +2,7 @@
 //! native dialogs (rfd), key commands, the "save changes?" and "revert?" prompts and the window
 //! title ("<project> - Tracks", as in Logic).
 use crate::model::Project;
+use crate::start_screen::Template;
 use crate::{project_io, App};
 use egui::{Key, KeyboardShortcut, Modifiers};
 use prowave_project::ProjectDoc;
@@ -20,6 +21,8 @@ pub enum FileCmd {
     Revert,
     /// Opens `UiState::recent_pick` (File > Open Recent).
     OpenRecent,
+    /// Starts a new project from a template (Project Chooser).
+    NewFrom(Template),
 }
 
 impl FileCmd {
@@ -34,7 +37,9 @@ impl FileCmd {
             FileCmd::Open => (Modifiers::COMMAND, Key::O),
             FileCmd::Save => (Modifiers::COMMAND, Key::S),
             FileCmd::SaveAs => (Modifiers::COMMAND | Modifiers::SHIFT, Key::S),
-            FileCmd::SaveCopy | FileCmd::Revert | FileCmd::OpenRecent => return None,
+            FileCmd::SaveCopy | FileCmd::Revert | FileCmd::OpenRecent | FileCmd::NewFrom(_) => {
+                return None
+            }
         };
         Some(KeyboardShortcut::new(modifiers, key))
     }
@@ -86,7 +91,10 @@ impl App {
     /// Runs a File menu command. New / Open / Open Recent first ask what to do with unsaved
     /// changes, and Revert asks before throwing them away.
     pub fn run_file_cmd(&mut self, cmd: FileCmd, ctx: &egui::Context) {
-        let discards = matches!(cmd, FileCmd::New | FileCmd::Open | FileCmd::OpenRecent);
+        let discards = matches!(
+            cmd,
+            FileCmd::New | FileCmd::Open | FileCmd::OpenRecent | FileCmd::NewFrom(_)
+        );
         if cmd == FileCmd::Revert {
             self.request_revert();
         } else if discards && content(&self.project) != self.saved {
@@ -100,6 +108,7 @@ impl App {
     fn do_file_cmd(&mut self, cmd: FileCmd, ctx: &egui::Context) {
         match cmd {
             FileCmd::New => self.replace(Project::empty(), None),
+            FileCmd::NewFrom(t) => self.replace(t.project(), None),
             FileCmd::Open => {
                 if let Some(path) = dialog().set_title("Open Project").pick_file() {
                     self.open(&path, ctx);
@@ -323,11 +332,17 @@ impl App {
         self.path = path;
         self.saved = content(&self.project);
         self.ui.reset_views();
+        // A project is open now, so the Project Chooser has done its job.
+        self.ui.chooser = None;
     }
 
     /// Keeps the window title in step with the project name.
     pub fn update_title(&mut self, ctx: &egui::Context) {
-        let title = format!("Pro Wave — {} - Tracks", self.project.name);
+        let title = if self.ui.chooser.is_some() {
+            "Pro Wave — Project Chooser".to_string()
+        } else {
+            format!("Pro Wave — {} - Tracks", self.project.name)
+        };
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title = title;
@@ -349,6 +364,7 @@ mod tests {
             sync: None,
             path: None,
             title: String::new(),
+            native_menu: None,
         }
     }
 
