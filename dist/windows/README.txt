@@ -14,6 +14,13 @@ Run it
 Windows may show "Windows protected your PC" (SmartScreen) because the program is not code
 signed yet. Choose "More info", then "Run anyway".
 
+Some antivirus programs (for example Norton, Avast, AVG or McAfee) block new unsigned
+programs they have not seen before. Windows then says "Windows cannot access the specified
+device, path or file" or "Access is denied". Restoring the file from the antivirus's
+history is not always enough: add the Pro Wave folder to its exclusions. In Norton: Settings >
+Antivirus > Scans and Risks > "Items to Exclude from Auto-Protect, Script Control, SONAR and
+Download Intelligence Detection" > Configure > Add Folders. Then double-click prowave.exe again.
+
 From a terminal:
   prowave.exe song.prowave          open a project
   prowave.exe drums.wav bass.flac   start a new project and import audio files

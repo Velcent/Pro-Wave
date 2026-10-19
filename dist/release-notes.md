@@ -19,6 +19,7 @@ Linux packages need glibc 2.31 or newer (Ubuntu 20.04+, Debian 11+, Fedora 32+) 
 None of the files is code signed, so your system will warn before running them:
 
 - **Windows:** SmartScreen shows "Windows protected your PC". Choose *More info*, then *Run anyway*.
+- **Windows antivirus:** Norton, Avast, AVG or McAfee may block the unsigned `prowave.exe` with "Windows cannot access the specified device, path or file". Add the Pro Wave folder to the antivirus's exclusions (Norton: *Settings > Antivirus > Scans and Risks > Items to Exclude from Auto-Protect, Script Control, SONAR and Download Intelligence Detection*).
 - **macOS:** the app is ad-hoc signed but not notarized. The first time, right-click `Pro Wave.app`, choose *Open*, then *Open* again. If macOS says the app is damaged, run `xattr -dr com.apple.quarantine "/Applications/Pro Wave.app"`.
 
 ## How well tested is it?
