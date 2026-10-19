@@ -231,7 +231,8 @@ This is exhaustive. Based on Logic Pro 10.7 / 11.
 ### Phase 1: Audio Engine Core + Track System (Weeks 5-10)
 - [ ] Transport: sample-accurate clock, tempo map (tempo + time signature automation), SMPTE sync
   - Done (engine): `prowave-engine/src/tempo_map.rs` — tempo events (5-990 BPM, quarter-note tempo like Logic) and signature events, beat<->seconds, bars/beats; the transport advances through tempo changes per sample, audio clips are positioned by real time, the metronome follows the signature (accent on bar 1). Sent with `Command::SetTempoMap` (old map freed off the audio thread).
-  - Pending: tempo curves (only step changes now), Tempo/Signature tracks in the UI + project file (the app still sends one tempo + signature), SMPTE sync; the app's own bar/beat and SMPTE display should use `TempoMap` (it ignores the signature denominator).
+  - App: the project has one tempo and one time signature, both saved in `.prowave`. The LCD edits them (drag the tempo, or the signature's numerator and denominator); bar/beat display, region placement, grid lines and snapping follow the signature in quarter notes, so 6/8 and 7/8 line up with the engine.
+  - Pending: tempo curves (only step changes now), Tempo/Signature tracks in the UI + project file (several tempo or signature changes per song), SMPTE sync; the app's SMPTE display should use `TempoMap`.
 - [ ] Track types: Audio, Instrument, Aux, Master, VCA, Folder/Summing Stacks, External MIDI
 - [ ] Region system: Audio regions (backed by `symphonia` decoder wav/aiff/caf/mp3/flac), MIDI regions, Pattern regions, Drummer regions
 - [ ] Non-destructive editing: clip gain, fade in/out with curves (equal-power, linear, S-curve), crossfade, Reverse, Normalize (non-destructive)

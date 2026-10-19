@@ -97,7 +97,7 @@ How the Linux build was made from Windows (cross-compiling, no WSL/Docker needed
 
 ### App UI (`prowave-app`), styled after Logic Pro
 - **Control bar:** view buttons, transport (Play turns green), Logic-style LCD (SMPTE,
-  bars/beats, locators, tempo — drag to change, signature, MIDI in/out, CPU/HD), count-in,
+  bars/beats, locators, tempo and time signature — drag to change, MIDI in/out, CPU/HD), count-in,
   metronome, master volume (stereo meters + glassy knob), right-hand icon buttons.
 - **Menu bar:** File / Edit / Track / Navigate / Record / Mix / View / Window / Help.
   Entries drawn like Logic/macOS (check marks, key commands on the right, greyed entries);
@@ -242,7 +242,7 @@ arrangement (48 busy voices, filtered saw/square + vibrato, drums, metronome, te
 
 | Roadmap item | | What's there / what's missing |
 |---|---|---|
-| Transport: sample-accurate clock, tempo map, SMPTE sync | 🟡 | Engine tempo map with tempo + signature changes ✅. **Missing:** Tempo/Signature tracks in the UI and in `.prowave` (app sends one tempo), tempo curves, LCD bar/beat + SMPTE via `TempoMap`, SMPTE sync |
+| Transport: sample-accurate clock, tempo map, SMPTE sync | 🟡 | Engine tempo map with tempo + signature changes ✅. App: one tempo and one editable time signature (LCD drag), saved in `.prowave`, bars/beats/regions/grid/snap follow the signature (6/8 and 7/8 match the engine) ✅. **Missing:** Tempo/Signature tracks in the UI and several changes per song in `.prowave`, tempo curves, SMPTE via `TempoMap`, SMPTE sync |
 | Track types: Audio, Instrument, Aux, Master, VCA, Folder/Summing Stacks, External MIDI | 🟡 | Audio, Instrument, Drummer (as instrument), Stereo Out/Master ✅. **Missing:** Aux, VCA, Folder/Summing Stacks, External MIDI; Bus exists only as a label (no routing); >64 tracks share one engine slot |
 | Regions: audio (wav/aiff/caf/mp3/flac), MIDI, Pattern, Drummer | 🟡 | Audio WAV/AIFF/FLAC + MIDI regions ✅. **Missing:** CAF and MP3 decoding, Pattern regions, Drummer regions |
 | Non-destructive editing: clip gain, fades, crossfades, reverse, normalize | ❌ | Only MIDI region parameters (quantize, transpose, velocity). **Missing:** all audio-region editing listed |
