@@ -21,6 +21,8 @@ fn kind_to_doc(k: TrackKind) -> TrackKindDoc {
         TrackKind::Drummer => TrackKindDoc::Drummer,
         TrackKind::Bus => TrackKindDoc::Bus,
         TrackKind::Output => TrackKindDoc::Output,
+        TrackKind::Aux => TrackKindDoc::Aux,
+        TrackKind::Folder => TrackKindDoc::Folder,
     }
 }
 
@@ -31,6 +33,8 @@ fn kind_from_doc(k: TrackKindDoc) -> TrackKind {
         TrackKindDoc::Drummer => TrackKind::Drummer,
         TrackKindDoc::Bus => TrackKind::Bus,
         TrackKindDoc::Output => TrackKind::Output,
+        TrackKindDoc::Aux => TrackKind::Aux,
+        TrackKindDoc::Folder => TrackKind::Folder,
     }
 }
 
@@ -150,6 +154,8 @@ pub fn to_doc(p: &Project) -> (ProjectDoc, Vec<MediaFile>) {
             send_level: t.send.level,
             send_pre: t.send.pre,
             height: t.height,
+            indent: t.indent,
+            folded: t.folded,
             regions: t
                 .regions
                 .iter()
@@ -288,6 +294,8 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
             },
             category: t.category.as_deref().map(intern),
             height: finite_in(t.height, Track::MIN_HEIGHT, Track::MAX_HEIGHT, 1.0),
+            indent: t.indent,
+            folded: t.folded,
         });
     }
     let mut p = Project::empty();
@@ -304,6 +312,8 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
     p.master_vol = doc.master_vol.clamp(0.0, 2.0);
     p.selected_track = doc.selected_track.min(tracks.len().saturating_sub(1));
     p.tracks = tracks;
+    // A hand-edited file cannot nest tracks deeper than the folders above them allow.
+    p.normalize_nesting();
     p.playing = false;
     p.recording = false;
     (p, warnings)
@@ -454,6 +464,37 @@ pub(crate) mod tests {
         assert_eq!(audio.regions.len(), 2);
         assert!(audio.regions.iter().all(|r| r.audio.is_some()));
         assert_eq!(audio.regions[1].start_bar, 9.0);
+    }
+
+    #[test]
+    fn aux_and_folder_tracks_and_their_nesting_survive_a_save() {
+        let mut p = Project::demo();
+        let (kinds, extra): (Vec<_>, Vec<_>) = (
+            vec![TrackKind::Folder, TrackKind::Instrument, TrackKind::Aux],
+            vec![(0u8, true), (1, false), (0, false)],
+        );
+        for ((kind, (indent, folded)), name) in
+            kinds.into_iter().zip(extra).zip(["Stack", "In", "Rev"])
+        {
+            let mut t = Track::new(name, kind);
+            (t.indent, t.folded) = (indent, folded);
+            p.tracks.push(t);
+        }
+        let first_new = p.tracks.len() - 3;
+        let (doc, _) = to_doc(&p);
+        let (back, _) = from_doc(&doc, Path::new("."), &egui::Context::default());
+        let got: Vec<_> = back.tracks[first_new..]
+            .iter()
+            .map(|t| (t.name.as_str(), t.kind, t.indent, t.folded))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("Stack", TrackKind::Folder, 0, true),
+                ("In", TrackKind::Instrument, 1, false),
+                ("Rev", TrackKind::Aux, 0, false),
+            ]
+        );
     }
 
     #[test]

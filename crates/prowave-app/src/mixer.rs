@@ -1046,8 +1046,11 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
     let kind_visible = |k: TrackKind| match k {
         TrackKind::Audio => filters[0],
         TrackKind::Instrument | TrackKind::Drummer => filters[1],
+        TrackKind::Aux => filters[2],
         TrackKind::Bus => filters[3],
         TrackKind::Output => filters[5],
+        // A folder is only a way to group tracks; it has no channel strip.
+        TrackKind::Folder => false,
     };
     let mut keys: Vec<StripKey> = if p.tracks.is_empty() {
         Vec::new()

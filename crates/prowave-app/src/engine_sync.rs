@@ -361,6 +361,8 @@ mod tests {
             category: None,
             send: crate::model::SendSlot::default(),
             height: 1.0,
+            indent: 0,
+            folded: false,
         }
     }
 

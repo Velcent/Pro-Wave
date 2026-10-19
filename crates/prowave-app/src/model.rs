@@ -6,13 +6,24 @@ use egui::Color32;
 use prowave_engine::AudioFile;
 use std::sync::{Arc, OnceLock};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TrackKind {
     Instrument,
     Audio,
     Drummer,
     Bus,
     Output,
+    /// Auxiliary channel strip: gets its sound from a bus, so it has no regions.
+    Aux,
+    /// Folder (track stack): holds the tracks nested under it and makes no sound itself.
+    Folder,
+}
+
+impl TrackKind {
+    /// Whether tracks of this kind hold regions (Aux and Folder tracks do not).
+    pub fn has_regions(self) -> bool {
+        matches!(self, Self::Instrument | Self::Audio | Self::Drummer)
+    }
 }
 
 #[derive(Clone)]
@@ -110,12 +121,50 @@ pub struct Track {
     /// Individual track height as a factor of the global track zoom (Logic: drag the lower
     /// edge of a track). 1.0 = the zoom slider's height.
     pub height: f32,
+    /// Folder nesting level, 0 at the top. A track belongs to the closest `Folder` track above
+    /// it with a lower level.
+    pub indent: u8,
+    /// A `Folder` track whose tracks are hidden in the Tracks area.
+    pub folded: bool,
 }
 
 impl Track {
     /// Smallest and largest individual height factor.
     pub const MIN_HEIGHT: f32 = 0.5;
     pub const MAX_HEIGHT: f32 = 6.0;
+
+    /// A new track of `kind` with default settings and no regions: software instruments get
+    /// the Sampler, and every kind its own colour.
+    pub fn new(name: impl Into<String>, kind: TrackKind) -> Self {
+        let (color, instrument) = match kind {
+            TrackKind::Instrument => (Color32::from_rgb(0x4e, 0xb0, 0x4a), Some("Sampler")),
+            TrackKind::Drummer => (Color32::from_rgb(0xd9, 0xaa, 0x2a), Some("Drum Kit")),
+            TrackKind::Audio => (Color32::from_rgb(0x3f, 0x5f, 0xc0), None),
+            TrackKind::Aux => (Color32::from_rgb(0x2a, 0xa8, 0xa8), None),
+            TrackKind::Folder => (Color32::from_rgb(0x88, 0x8c, 0x98), None),
+            TrackKind::Bus | TrackKind::Output => (Color32::from_rgb(0x7a, 0x4f, 0xc0), None),
+        };
+        Self {
+            name: name.into(),
+            kind,
+            color,
+            mute: false,
+            solo: false,
+            rec: false,
+            monitor: false,
+            volume_db: 0.0,
+            pan: 0.0,
+            inserts: vec![],
+            instrument,
+            regions: vec![],
+            params: TrackParams::default(),
+            send: SendSlot::default(),
+            category: None,
+            height: 1.0,
+            indent: 0,
+            folded: false,
+        }
+    }
 }
 
 pub struct Project {
@@ -186,6 +235,8 @@ impl Project {
             category: None,
             send: SendSlot::default(),
             height: 1.0,
+            indent: 0,
+            folded: false,
         }];
         p.position_beats = 0.0;
         p.cycle = false;
@@ -232,6 +283,8 @@ impl Project {
             category: None,
             send: SendSlot::default(),
             height: 1.0,
+            indent: 0,
+            folded: false,
         };
         let tracks = vec![
             mk(
@@ -333,6 +386,16 @@ impl Project {
     /// Quarter notes per bar: 4 for 4/4, 3 for 6/8 and 3/4, 3.5 for 7/8.
     pub fn beats_per_bar(&self) -> f64 {
         self.sig.0.max(1) as f64 * self.beat_unit()
+    }
+
+    /// Repairs folder nesting: a track can sit at most one level below the track before it,
+    /// and only when that one is a `Folder`. Run after loading a file that may be hand-edited.
+    pub fn normalize_nesting(&mut self) {
+        let mut allowed = 0u8;
+        for t in &mut self.tracks {
+            t.indent = t.indent.min(allowed);
+            allowed = t.indent + u8::from(t.kind == TrackKind::Folder);
+        }
     }
 
     /// Moves one half of the time signature by `steps` (up is positive) and returns whether it
@@ -452,6 +515,42 @@ mod tests {
         assert_eq!(q.song_rev, rev);
     }
 
+    #[test]
+    fn new_tracks_have_the_defaults_of_their_kind() {
+        let inst = Track::new("Inst 1", TrackKind::Instrument);
+        assert_eq!((inst.instrument, inst.regions.len()), (Some("Sampler"), 0));
+        for kind in [TrackKind::Aux, TrackKind::Folder] {
+            let t = Track::new("x", kind);
+            assert!(t.instrument.is_none() && !kind.has_regions());
+            assert_eq!(
+                (t.indent, t.folded, t.volume_db, t.height),
+                (0, false, 0.0, 1.0)
+            );
+        }
+        assert!(TrackKind::Audio.has_regions() && TrackKind::Drummer.has_regions());
+    }
+
+    #[test]
+    fn nesting_is_repaired_to_what_the_folders_allow() {
+        let mut p = Project::demo();
+        let (inst, folder) = (TrackKind::Instrument, TrackKind::Folder);
+        let at = |k, indent| {
+            let mut t = Track::new("t", k);
+            t.indent = indent;
+            t
+        };
+        p.tracks = vec![
+            at(inst, 5), // first track: nothing above it
+            at(folder, 0),
+            at(inst, 9), // right under a folder: at most one level
+            at(folder, 1),
+            at(inst, 2), // nested folder: two levels is fine
+            at(inst, 7), // after a plain track: no deeper than it
+        ];
+        p.normalize_nesting();
+        let got: Vec<u8> = p.tracks.iter().map(|t| t.indent).collect();
+        assert_eq!(got, [0, 0, 1, 1, 2, 2]);
+    }
     #[test]
     fn an_invalid_denominator_steps_from_quarter_notes() {
         let mut p = Project::demo();

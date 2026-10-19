@@ -68,6 +68,8 @@ pub fn import_audio(p: &mut Project, path: &Path, ctx: &egui::Context) -> Result
         category: None,
         send: crate::model::SendSlot::default(),
         height: 1.0,
+        indent: 0,
+        folded: false,
     });
     p.selected_track = p.tracks.len() - 1;
     p.song_rev += 1;

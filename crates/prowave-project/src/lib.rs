@@ -35,6 +35,10 @@ pub enum TrackKindDoc {
     Drummer,
     Bus,
     Output,
+    /// Auxiliary channel strip: receives from a bus, has no regions.
+    Aux,
+    /// Folder (track stack): groups the tracks nested under it, has no sound of its own.
+    Folder,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
@@ -86,6 +90,11 @@ pub struct TrackDoc {
     pub send_pre: bool,
     /// Individual track height (factor of the global track zoom).
     pub height: f32,
+    /// Folder nesting level, 0 at the top. A track belongs to the closest `Folder` track above
+    /// it that has a lower level (files from before folders load with 0, i.e. no nesting).
+    pub indent: u8,
+    /// A `Folder` track whose tracks are hidden in the Tracks area.
+    pub folded: bool,
     pub regions: Vec<RegionDoc>,
 }
 
@@ -110,6 +119,8 @@ impl Default for TrackDoc {
             send_level: 0.0,
             send_pre: false,
             height: 1.0,
+            indent: 0,
+            folded: false,
             regions: Vec::new(),
         }
     }
@@ -407,6 +418,34 @@ mod tests {
     }
 
     #[test]
+    fn aux_and_folder_tracks_round_trip_with_their_nesting() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("stack.prowave");
+        let track = |name: &str, kind, indent, folded| TrackDoc {
+            name: name.into(),
+            kind,
+            indent,
+            folded,
+            ..TrackDoc::default()
+        };
+        let doc = ProjectDoc {
+            tracks: vec![
+                track("Drums", TrackKindDoc::Folder, 0, true),
+                track("Kick", TrackKindDoc::Instrument, 1, false),
+                track("Sub", TrackKindDoc::Folder, 1, false),
+                track("Rev", TrackKindDoc::Aux, 0, false),
+            ],
+            ..ProjectDoc::default()
+        };
+        save(&file, &doc, &[]).unwrap();
+        let back = load(&file, &dir.path().join("m")).unwrap();
+        assert_eq!(back, doc);
+        assert_eq!(back.tracks[0].kind, TrackKindDoc::Folder);
+        assert!(back.tracks[0].folded && back.tracks[2].indent == 1);
+        assert_eq!(back.tracks[3].kind, TrackKindDoc::Aux);
+    }
+
+    #[test]
     fn missing_fields_take_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("old.prowave");
@@ -420,6 +459,7 @@ mod tests {
         assert_eq!(doc.name, "Old");
         assert_eq!(doc.tempo, 120.0);
         assert_eq!(doc.tracks[0].vel_limit, (1, 127));
+        assert_eq!((doc.tracks[0].indent, doc.tracks[0].folded), (0, false));
     }
 
     #[test]

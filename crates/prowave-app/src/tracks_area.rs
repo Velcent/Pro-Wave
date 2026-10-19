@@ -700,6 +700,8 @@ fn new_track(p: &mut Project, name: String) {
         category: None,
         send: crate::model::SendSlot::default(),
         height: 1.0,
+        indent: 0,
+        folded: false,
     });
     p.selected_track = p.tracks.len() - 1;
     p.song_rev += 1;
