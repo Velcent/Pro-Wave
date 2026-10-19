@@ -134,6 +134,13 @@ impl Svf {
         1.0 / (0.7 + resonance.clamp(0.0, 1.0) * 9.0)
     }
 
+    /// Largest [`Svf::coefficient`] that keeps the filter stable with `damping`. The Chamberlin
+    /// filter diverges once f² + 2·f·damping reaches 4, which a high cutoff with little
+    /// resonance (much damping) can reach below the cutoff clamp.
+    pub fn max_coefficient(damping: f32) -> f32 {
+        0.98 * ((damping * damping + 4.0).sqrt() - damping)
+    }
+
     /// One sample with precomputed [`Svf::coefficient`] and [`Svf::damping`].
     pub fn tick(&mut self, x: f32, f: f32, damping: f32) -> (f32, f32) {
         self.low += f * self.band;

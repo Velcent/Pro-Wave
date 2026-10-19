@@ -420,6 +420,23 @@ fn wrap_phase(p: f32) -> f32 {
     }
 }
 
+/// `x`, or 0 when it is NaN or infinite.
+#[inline]
+fn finite_or_zero(x: f32) -> f32 {
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
+}
+
+/// A meter's new peak: this callback's peak, or the old one decayed. Never NaN or infinite, so
+/// a bad value cannot stick (`inf * 0.85` is still `inf`).
+#[inline]
+fn decayed_peak(new: f32, old: f32) -> f32 {
+    finite_or_zero(new.max(old * 0.85)).min(16.0)
+}
+
 fn midi_hz(p: u8) -> f32 {
     440.0 * 2f32.powf((p as f32 - 69.0) / 12.0)
 }
@@ -794,7 +811,8 @@ impl EngineCore {
                         } else {
                             pt.cutoff * 2f32.powf(pt.filter_env * v.env * 4.0)
                         };
-                        v.filter_f = Svf::coefficient(fc, sr);
+                        v.filter_f =
+                            Svf::coefficient(fc, sr).min(Svf::max_coefficient(v.filter_damping));
                     }
                 }
                 v.ctrl_left -= 1;
@@ -812,6 +830,12 @@ impl EngineCore {
                 if filtered {
                     let (low, high) = v.filter.tick(x, v.filter_f, v.filter_damping);
                     x = if pt.highpass { high } else { low };
+                }
+                // Last line of defence: a voice that ever goes NaN or infinite is silenced for
+                // that sample and its filter reset, instead of poisoning the mix and meters.
+                if !x.is_finite() {
+                    v.filter = Svf::default();
+                    x = 0.0;
                 }
                 let t = v.track as usize;
                 if self.track_audible[t] {
@@ -841,8 +865,9 @@ impl EngineCore {
                 r += c;
             }
             let master = self.master.next();
-            l = (l * master).clamp(-1.0, 1.0);
-            r = (r * master).clamp(-1.0, 1.0);
+            // `clamp` lets NaN through, so a non-finite sum becomes silence first.
+            l = finite_or_zero(l * master).clamp(-1.0, 1.0);
+            r = finite_or_zero(r * master).clamp(-1.0, 1.0);
             pk_l = pk_l.max(l.abs());
             pk_r = pk_r.max(r.abs());
             frame[0] = l;
@@ -896,18 +921,18 @@ impl EngineCore {
         let (ol, or) = self.shared.peaks();
         self.shared
             .peak_l
-            .store(pk_l.max(ol * 0.85).to_bits(), Ordering::Relaxed);
+            .store(decayed_peak(pk_l, ol).to_bits(), Ordering::Relaxed);
         self.shared
             .peak_r
-            .store(pk_r.max(or * 0.85).to_bits(), Ordering::Relaxed);
+            .store(decayed_peak(pk_r, or).to_bits(), Ordering::Relaxed);
         for t in 0..MAX_TRACKS {
             let (ol, or) = self.shared.track_peaks(t);
             self.shared.track_peak_l[t].store(
-                self.track_pk_l[t].max(ol * 0.85).to_bits(),
+                decayed_peak(self.track_pk_l[t], ol).to_bits(),
                 Ordering::Relaxed,
             );
             self.shared.track_peak_r[t].store(
-                self.track_pk_r[t].max(or * 0.85).to_bits(),
+                decayed_peak(self.track_pk_r[t], or).to_bits(),
                 Ordering::Relaxed,
             );
         }
@@ -1217,6 +1242,49 @@ mod tests {
             early(&slow),
             early(&fast)
         );
+    }
+
+    /// A GitHub report: piano patches (no resonance, a filter envelope that opens the cutoff
+    /// to its limit) made the filter diverge, and the track's peak meter stuck at `inf`.
+    #[test]
+    fn a_fully_opened_filter_without_resonance_stays_finite() {
+        use crate::synth::Wave;
+        let patch = SynthPatch {
+            wave_a: Wave::Saw,
+            cutoff: 4000.0,
+            resonance: 0.0,
+            filter_env: 1.0,
+            ..SynthPatch::default()
+        };
+        for pitch in [48, 72, 96] {
+            let out = play_note_with(patch, pitch, 48_000);
+            assert!(out.iter().all(|x| x.is_finite()), "pitch {pitch}");
+            assert!(out.iter().any(|x| x.abs() > 0.01), "pitch {pitch} silent");
+        }
+    }
+
+    #[test]
+    fn stuck_or_bad_peaks_fall_back_to_finite_values() {
+        assert_eq!(decayed_peak(f32::INFINITY, 0.5), 0.0);
+        assert_eq!(decayed_peak(0.2, f32::INFINITY), 0.0);
+        assert_eq!(
+            decayed_peak(f32::NAN, 0.5),
+            0.5 * 0.85,
+            "NaN is ignored by max"
+        );
+        assert_eq!(decayed_peak(0.0, 1.0), 0.85, "decays");
+        assert_eq!(finite_or_zero(f32::NAN), 0.0);
+        assert_eq!(finite_or_zero(-0.25), -0.25);
+    }
+
+    #[test]
+    fn the_stability_limit_holds_for_every_resonance() {
+        for r in [0.0, 0.05, 0.3, 1.0] {
+            let d = Svf::damping(r);
+            let f = Svf::max_coefficient(d);
+            assert!(f * f + 2.0 * f * d < 4.0, "resonance {r}");
+            assert!(f > 0.9, "the limit leaves the filter bright: {f}");
+        }
     }
 
     #[test]
