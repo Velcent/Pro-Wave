@@ -208,6 +208,47 @@ This is exhaustive. Based on Logic Pro 10.7 / 11.
 
 ## 3. Phased Roadmap — Implementation Order for Claude
 
+### Current work split (updated 2026-10-20)
+
+**Claude owns every crate** (`prowave-engine`, `prowave-app`, `prowave-project`, `xtask`,
+workflows, docs): all feature work and all engine work. **ChatGPT 6 does small, separate
+checks only** and never edits a crate's feature code. Each check ends in a short report and,
+where something is wrong, a minimal fix with a test, in its own commit.
+
+#### ChatGPT 6: small tasks (bug and exploit checks)
+
+1. **Hostile project files.** Try to break `.prowave` opening (`prowave-project`,
+   `project_io.rs`): zip bombs and huge declared sizes, `../` and absolute paths in media
+   names, duplicate and very long names, NaN/inf/huge numbers in `project.json`, deeply nested
+   folders, thousands of tracks/regions/notes. Expected: a clear error or clamped values, never
+   a crash, a hang, a file written outside the project's media folder, or unbounded memory.
+2. **Hostile audio files.** The same for `AudioFile::open` / streaming (`disk.rs`): truncated
+   and zero-length files, header lying about its length, absurd sample rates and channel
+   counts, 8/16/24/32-bit and float variants, AIFF and FLAC edge cases.
+3. **Panic hunt.** Grep non-test code for `unwrap`, `expect`, `[..]` indexing, `as` casts and
+   integer arithmetic that can panic or overflow on input from files or the UI; list each with
+   the input that triggers it.
+4. **`unsafe` and dependencies.** List every `unsafe` block with its safety argument, run
+   `cargo deny` / `cargo audit`, and note new advisories.
+5. **Translation files.** Read `crates/prowave-app/locales/*.txt` for wrong or unnatural
+   wording (they were written by an AI); fix a line only with a reason, keep `{}` placeholders.
+
+Rules: small diffs, `cargo xtask check` green, one commit per finding.
+
+#### Claude: everything else, in this order
+
+1. ✅ Tempo track, Marker track, Region gain / fades / reverse / normalize, compact menus,
+   17 languages (see the changelog).
+2. Engine leftovers (Phase 0): triple buffer for meters/position, `basedrop` or a documented
+   reason to keep the garbage queue, Windows latency (try ASIO on real hardware), PipeWire/JACK.
+3. Signature track (several time signatures per song), tempo ramps and SMPTE in the interface.
+4. Fade tool on the region, crossfades, Flex / Smart Tempo groundwork (Phases 2-3).
+
+Engine items already done by ChatGPT 6 and reviewed on 2026-10-20: region gain, fades and
+reverse (`ClipEdit`), `peak_of`, tempo ramps, SMPTE, optional `asio` feature, the 24-track
+streaming check, input hardening. Review fixes: SMPTE labels one frame early at frame-exact
+positions (fixed, tested), prefetch size now follows the number of clips.
+
 ### Phase 0: Foundation (Weeks 1-4)
 - [x] `cargo xtask` setup, CI for mac/win/linux + wasm
   - Done: `cargo xtask check|wasm-check|rt-check` (fmt, clippy -D warnings, tests, no-alloc, cargo-deny, wasm32) passes on Windows.
@@ -232,11 +273,26 @@ This is exhaustive. Based on Logic Pro 10.7 / 11.
 - [ ] Transport: sample-accurate clock, tempo map (tempo + time signature automation), SMPTE sync
   - Done (engine): `prowave-engine/src/tempo_map.rs` — tempo events (5-990 BPM, quarter-note tempo like Logic) and signature events, beat<->seconds, bars/beats; the transport advances through tempo changes per sample, audio clips are positioned by real time, the metronome follows the signature (accent on bar 1). Sent with `Command::SetTempoMap` (old map freed off the audio thread).
   - App: the project has one tempo and one time signature, both saved in `.prowave`. The LCD edits them (drag the tempo, or the signature's numerator and denominator); bar/beat display, region placement, grid lines and snapping follow the signature in quarter notes, so 6/8 and 7/8 line up with the engine.
-  - Pending: tempo curves (only step changes now), Tempo/Signature tracks in the UI + project file (several tempo or signature changes per song), SMPTE sync; the app's SMPTE display should use `TempoMap`.
+  - Tempo track (2026-10-20): Track > Show Tempo Track shows a global Tempo track above the tracks. Double-click adds a tempo change (snapped to the grid), drag a point to change its tempo or move it, double-click or right-click > Delete Tempo Change removes it. Saved in `.prowave` (`tempo_changes`, older files open with none), undoable, sent to the engine as a `TempoMap`; the LCD shows and edits the tempo at the playhead; imported audio gets its length from the tempo map.
+  - Marker track (2026-10-20): Track > Show Marker Track; double-click to add, click to jump, drag to move, double-click to rename, right-click for colour and Delete. Navigate > Create Marker (at the nearest bar), Delete Marker, Go to Next / Previous Marker. Saved in `.prowave` (`markers`).
+  - Pending: tempo curves (only step changes now), Signature track (several signatures per song), SMPTE sync; the app's SMPTE display should use `TempoMap`.
 - [ ] Track types: Audio, Instrument, Aux, Master, VCA, Folder/Summing Stacks, External MIDI
 - [ ] Region system: Audio regions (backed by `symphonia` decoder wav/aiff/caf/mp3/flac), MIDI regions, Pattern regions, Drummer regions
 - [ ] Non-destructive editing: clip gain, fade in/out with curves (equal-power, linear, S-curve), crossfade, Reverse, Normalize (non-destructive)
+  - Done (engine, 2026-10-20): clip gain, beat-based fades, and reverse playback via `Engine::stream_clip_with`; `peak_of` for Normalize.
+  - Region end timing is cached between song/map/transport changes; completed fades skip
+    curve evaluation. Tests verify fade output after tempo and song changes without allocation.
+  - Done (app, 2026-10-20): Region Inspector Gain, Fade In/Out (1/16-note steps, shown in ms), Curve, Reverse; right-click Normalize Region Gain (non-destructive, peak to 0 dBFS) and Reverse Region; waveform drawn with gain, reversed, fades shaded; saved in `.prowave`. Pending: crossfades, Fade tool on the region.
 - [ ] Disk streaming: memory-mapped + prefetch thread, 1000 tracks streaming test
+  - Done (engine): one background decoder/prefetch thread and per-clip lock-free rings; ring
+    capacity reduced to about 64 KiB (170 ms at 48 kHz) per clip, down from about 512 KiB.
+  - Reverse streaming reuses decoded windows with 8,192 extra source frames of look-behind,
+    avoiding decoder seeks on every output block; verified across cache boundaries and seeks
+    at matching, higher, and lower output sample rates.
+  - Disk registration work is limited to eight requests per worker pass so active streams
+    get refills during import bursts; canceled requests are discarded before opening files.
+  - Pending: memory-map PCM sources and scale the engine beyond `MAX_TRACKS = 64` before a
+    1000-track test can validate that target. The 24-track/60-second stream check passes.
 - [ ] Project file `.prowave`: zip with `project.json` (rkyv), `media/`, `bounces/`
 - **DoD:** Import 24 tracks 48k/24-bit, play without dropouts
 
