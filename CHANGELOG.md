@@ -21,6 +21,7 @@ being released into the GitHub Release notes, so keep one `## <version>` heading
 
 ✅ **No title bar.** Minimize / maximize / close are in the menu bar. Drag the bar to move, double-click to maximize, drag the edges to resize.
 ✅ The tall GNOME / Wayland header on Linux is gone
+✅ **Smooth maximize and resize:** the interface no longer rescales on every frame while the window changes size, so the animation stays fluid
 
 ### macOS
 
