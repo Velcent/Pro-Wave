@@ -65,6 +65,13 @@ pub struct RegionDoc {
     pub quantize: Option<f32>,
     pub transpose: i8,
     pub velocity: i8,
+    /// Audio regions: gain in dB, fades in quarter-note beats, fade curve ("linear",
+    /// "s_curve", anything else = equal power), reverse.
+    pub gain_db: f32,
+    pub fade_in: f32,
+    pub fade_out: f32,
+    pub fade_curve: String,
+    pub reverse: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -143,6 +150,27 @@ pub struct ProjectDoc {
     pub master_vol: f32,
     pub selected_track: usize,
     pub tracks: Vec<TrackDoc>,
+    /// Tempo changes after the start (Tempo track); `tempo` is the tempo at the start.
+    pub tempo_changes: Vec<TempoChangeDoc>,
+    /// Marker track.
+    pub markers: Vec<MarkerDoc>,
+}
+
+/// A marker from `beat` (quarter notes from the start) on.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct MarkerDoc {
+    pub beat: f64,
+    pub name: String,
+    pub color: [u8; 3],
+}
+
+/// A tempo change: `bpm` from `beat` (quarter notes from the start) on.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct TempoChangeDoc {
+    pub beat: f64,
+    pub bpm: f32,
 }
 
 impl Default for ProjectDoc {
@@ -162,6 +190,8 @@ impl Default for ProjectDoc {
             master_vol: 0.8,
             selected_track: 0,
             tracks: Vec::new(),
+            tempo_changes: Vec::new(),
+            markers: Vec::new(),
         }
     }
 }
