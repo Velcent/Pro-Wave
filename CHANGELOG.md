@@ -3,6 +3,37 @@
 What changed in each Pro Wave release. The release workflow copies the section of the version
 being released into the GitHub Release notes, so keep one `## <version>` heading per release.
 
+## 0.1.8
+
+### All systems (Windows, macOS, Linux)
+
+✅ **Updates from inside Pro Wave:** it looks for a newer release on GitHub when it starts (at most every 6 hours; *Help > Check for Updates…* checks at once, *Check for Updates Automatically* turns it off). A window shows what's new with *Install update*, *Download page*, *Later* and *Skip this version*. Nothing about you is sent.
+✅ **Installs the right package for how you installed it:** the Windows zip, the macOS app, the AppImage, the Linux tarball, and for `.deb` and `.rpm` installs that very package, installed with the system's package manager (the system asks for your password). A Flatpak bundle is downloaded and checked, and the command to install it is shown.
+✅ **Closes, updates, opens again:** *Close and update* closes Pro Wave, puts the new version in place and opens it. The download is checked against the SHA-256 that GitHub publishes for it, the old version is kept until the new one has been used once, and a failed update goes back to the old one and tells you why.
+✅ **MIDI recording:** play a MIDI keyboard with *Record* and *Play* on: a red region grows on the instrument track and the notes appear in it as you play. When you stop it turns into a normal region (the track's colour), ends on a bar line and plays back. The recording is one Undo step.
+✅ **Sustain pedal:** recorded with the notes, saved with the project and shown in the Event list as *Control · Sustain*. Every recording starts with where the pedal was.
+✅ **Take folders:** record with the Cycle on and every pass is a take. Two or more takes make a take folder: a yellow bar with the name and a triangle, and under it the comp, side by side, with a line where one take gives way to the next. Open it to see a row for each take (latest on top), drag on a take to play it in that stretch, click to pick the whole take. *Flatten Take Folder* turns the comp into an ordinary region. Saved with the project.
+✅ **List Editors (Event list):** the icon at the top right, *View > Show List Editors* or **D**. It lists the MIDI events of the selected region: position, note, velocity and length, with the notes of the other regions of the track in grey. A line marks the playhead and moves down the list at the speed of the notes while the song plays. Red while recording.
+✅ **Looks like Logic:**
+- Regions use Logic's own colours (measured from Logic Pro); a selected region is deeper with a yellow-green outline, and the ruler over it turns gold.
+- The playhead is yellow, and red while recording; the control bar's display turns red while recording too.
+- Piano Roll: notes coloured by velocity with a light edge, the region bar in the track's colour, a gold ruler, a Logic-style inspector header with the region and track, and the velocity lane drawn as dots with a line along each note.
+- Track volume sliders are a dark pill with a thumb that stays inside; the level meter shows inside it. 0 dB sits two thirds up, as in Logic.
+- Tracks that make no sound (muted, or another track is soloed) show their instruments, plug-ins, sends and meters in grey.
+✅ **The mixer keeps its size:** the mixer panel can no longer be stretched, which only stretched the faders and meters. The Piano Roll can still be made taller.
+✅ **The demo project is shown once per version** (the first time you open each new version) and then Pro Wave starts clean.
+✅ **Still light:** about 330–420 ms to start and 120 MB of memory at rest (Windows), 15.5 MB program (the update check adds about 1 MB)
+
+### Still to do or test
+
+❌ MIDI recording with real keyboards and the sustain pedal on other computers (checked by automated tests and a simulated recording only)
+❌ The pedal is recorded and shown but the engine does not play it yet
+❌ Take folders: editing notes needs *Flatten* first; making a take folder from existing regions, crossfades in the comp
+❌ Event list: the Marker, Tempo and Signature tabs, event type filters and editing values
+❌ The update install on a real Mac, a real Linux machine and with `pkexec`; only Windows was tried end to end
+❌ Help > Language texts for the new messages checked by native speakers
+❌ Region colours other than green, blue, yellow and purple are an estimate
+
 ## 0.1.7
 
 ### All systems (Windows, macOS, Linux)

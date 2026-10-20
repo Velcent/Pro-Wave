@@ -239,6 +239,9 @@ Rules: small diffs, `cargo xtask check` green, one commit per finding.
 
 1. ✅ Tempo track, Marker track, Region gain / fades / reverse / normalize, compact menus,
    17 languages (see the changelog).
+   ✅ 0.1.8: MIDI keyboard recording (with the sustain pedal), take folders from Cycle
+   recording, the Event list (List Editors), updates from GitHub (check and install for each
+   kind of install), Logic-accurate colours (regions, playhead, Piano Roll, sliders).
 2. Engine leftovers (Phase 0): triple buffer for meters/position, `basedrop` or a documented
    reason to keep the garbage queue, Windows latency (try ASIO on real hardware), PipeWire/JACK.
 3. Signature track (several time signatures per song), tempo ramps and SMPTE in the interface.
