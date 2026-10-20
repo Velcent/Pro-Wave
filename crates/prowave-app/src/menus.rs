@@ -228,6 +228,7 @@ const VIEW: &[&str] = &[
     "-",
     "Show Mixer",
     "Show Library",
+    "Show List Editors",
     "Show Quick Help",
     "Show Inspector",
     "Show Performers",
@@ -272,6 +273,9 @@ const HELP: &[&str] = &[
     "Logic-style Key Commands…",
     "-",
     "Language",
+    "-",
+    "Check for Updates…",
+    "Check for Updates Automatically",
     "-",
     "About Pro Wave",
 ];
@@ -318,6 +322,8 @@ pub(crate) const CHECKABLE: &[&str] = &[
     "Show Mixer",
     "Show Library",
     "Show Inspector",
+    "Show List Editors",
+    "Check for Updates Automatically",
     "Show Toolbar",
     "Show Track Header",
     "Show Ruler",
@@ -410,6 +416,7 @@ fn shortcut(label: &str) -> Option<KeyboardShortcut> {
     let key = match label {
         "Show Library" => Key::Y,
         "Show Inspector" => Key::I,
+        "Show List Editors" => Key::D,
         "Show Mixer" => Key::X,
         _ => return None,
     };
@@ -454,6 +461,9 @@ pub(crate) fn enabled(label: &str, p: &Project, s: &crate::UiState) -> bool {
         | "Show Mixer"
         | "Show Library"
         | "Show Inspector"
+        | "Show List Editors"
+        | "Check for Updates…"
+        | "Check for Updates Automatically"
         | "Show Tempo Track"
         | "Show Marker Track"
         | "Create Marker"
@@ -486,6 +496,8 @@ pub(crate) fn checked(label: &str, s: &crate::UiState) -> bool {
         "Show Mixer" => s.show_mixer && s.bottom == Bottom::Mixer,
         "Show Library" => s.show_library,
         "Show Inspector" => s.show_inspector,
+        "Show List Editors" => s.show_lists,
+        "Check for Updates Automatically" => s.update_auto,
         "Show Tempo Track" => s.tracks.show_tempo,
         "Show Marker Track" => s.tracks.show_markers,
         _ if Lang::from_native_name(label).is_some() => {
@@ -516,6 +528,12 @@ pub(crate) fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
         }
         "Show Library" => s.show_library = !s.show_library,
         "Show Inspector" => s.show_inspector = !s.show_inspector,
+        "Show List Editors" => s.show_lists = !s.show_lists,
+        "Check for Updates…" => s.update_check = true,
+        "Check for Updates Automatically" => {
+            s.update_auto = !s.update_auto;
+            crate::updater::set_auto_enabled(s.update_auto);
+        }
         "Show Tempo Track" => s.tracks.show_tempo = !s.tracks.show_tempo,
         "Show Marker Track" => s.tracks.show_markers = !s.tracks.show_markers,
         // Logic: Create Marker puts it at the playhead, rounded to the nearest bar.
@@ -950,7 +968,8 @@ mod tests {
                 p.tracks.len(),
                 p.position_beats,
                 p.recording,
-                (s.show_mixer, s.show_library, s.show_inspector),
+                (s.show_mixer, s.show_library, s.show_inspector, s.show_lists),
+                (s.update_check, s.update_auto),
                 s.bottom == Bottom::Mixer,
                 (s.file_cmd, s.chooser.is_some(), s.undo_cmd),
                 (s.ui_scale, s.tracks.bar_w, s.tracks.selected),

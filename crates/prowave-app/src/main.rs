@@ -7,6 +7,7 @@ static ALLOC_GUARD: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisab
 
 mod bench;
 mod engine_sync;
+mod event_list;
 mod file_commands;
 mod graphics;
 mod i18n;
@@ -15,6 +16,7 @@ mod inspector;
 mod library;
 mod marker_track;
 mod menus;
+mod midi_in;
 mod mixer;
 mod model;
 mod native_menu;
@@ -23,7 +25,9 @@ mod patches;
 mod piano_roll;
 mod project_io;
 mod recent_files;
+mod recorder;
 mod start_screen;
+mod takes;
 mod tempo_track;
 mod theme;
 mod track_icons;
@@ -31,6 +35,7 @@ mod tracks_area;
 mod transport;
 mod ui_scale;
 mod undo;
+mod updater;
 mod widgets;
 mod window_chrome;
 
@@ -46,6 +51,15 @@ pub struct UiState {
     pub show_mixer: bool,
     pub show_library: bool,
     pub show_inspector: bool,
+    /// List Editors (the Event list on the right).
+    pub show_lists: bool,
+    pub lists: event_list::ListView,
+    /// The MIDI recording in progress.
+    pub rec: recorder::Recorder,
+    /// Help > Check for Updates… was chosen.
+    pub update_check: bool,
+    /// Help > Check for Updates Automatically.
+    pub update_auto: bool,
     pub bottom: Bottom,
     /// Last import error or engine warning, shown in the menu bar.
     pub status: Option<String>,
@@ -89,6 +103,11 @@ impl UiState {
             show_mixer: true,
             show_library: true,
             show_inspector: true,
+            show_lists: false,
+            lists: event_list::ListView::default(),
+            rec: recorder::Recorder::default(),
+            update_check: false,
+            update_auto: true,
             bottom: Bottom::Mixer,
             status: None,
             tracks: tracks_area::TracksView::default(),
@@ -144,6 +163,10 @@ struct App {
     history: undo::History,
     /// Frames since the history last looked for an edit.
     frames_since_record: u32,
+    /// The MIDI keyboard (none while benchmarking).
+    midi: Option<midi_in::MidiIn>,
+    /// Looks for a newer release and installs it (Windows).
+    updater: updater::Updater,
 }
 
 impl App {
@@ -177,7 +200,12 @@ impl App {
             (ended, i.pointer.any_down())
         });
         let undo_cmd = self.ui.undo_cmd.take();
-        if !dragging && (gesture_ended || undo_cmd.is_some() || self.frames_since_record >= 30) {
+        // A MIDI recording is one edit: it is recorded when it ends, not on every frame.
+        let recording = self.ui.rec.active();
+        if !dragging
+            && !recording
+            && (gesture_ended || undo_cmd.is_some() || self.frames_since_record >= 30)
+        {
             self.frames_since_record = 0;
             self.history.record(&self.project);
         }
@@ -198,6 +226,54 @@ impl App {
         }
         self.ui.can_undo = self.history.can_undo();
         self.ui.can_redo = self.history.can_redo();
+    }
+
+    /// MIDI keyboard notes: play them on the selected instrument and, while recording, put
+    /// them into the new region.
+    fn play_and_record_midi(&mut self, ctx: &egui::Context) {
+        let mut input = Vec::new();
+        if let Some(midi) = self.midi.as_mut() {
+            midi.poll(&mut input);
+        }
+        let p = &mut self.project;
+        let s = &mut self.ui;
+        let track = s.rec.target().map_or(p.selected_track, |(t, _)| t);
+        let plays = p
+            .tracks
+            .get(track)
+            .is_some_and(|t| t.kind != model::TrackKind::Audio);
+        for note in &input {
+            if !plays {
+                break;
+            }
+            s.audition.push(match *note {
+                recorder::LiveNote::On { pitch, vel } => piano_roll::Audition::On {
+                    pitch,
+                    vel,
+                    track: track.min(255) as u8,
+                },
+                recorder::LiveNote::Off { pitch } => piano_roll::Audition::Off { pitch },
+                // The engine has no sustain pedal yet: it is only recorded.
+                recorder::LiveNote::Sustain { .. } => continue,
+            });
+        }
+        match recorder::update(&mut s.rec, p, &input) {
+            recorder::Outcome::Started(t, r) => {
+                s.tracks.selected = Some((t, r));
+                s.piano.selected.clear();
+            }
+            recorder::Outcome::Finished(kept) => {
+                s.tracks.selected = kept;
+                s.piano.selected.clear();
+            }
+            recorder::Outcome::NoTrack => {
+                s.status = Some(i18n::tr("Record: there is no instrument track").into());
+            }
+            recorder::Outcome::Nothing => {}
+        }
+        if s.rec.active() || !input.is_empty() {
+            ctx.request_repaint();
+        }
     }
 
     /// The window while the Project Chooser is up: the menu bar and the chooser, with the
@@ -329,23 +405,43 @@ impl eframe::App for App {
                 .frame(egui::Frame::new())
                 .show(ui, |ui| inspector::show(ui, p, s, &meters));
         }
-        if s.show_mixer || s.bottom == Bottom::PianoRoll {
-            // Starts at about half of the space under the control bar (500 points at most), so
-            // the Tracks area keeps room on short screens. (No upper limit: egui hides a panel
-            // whose size falls outside its range when the window shrinks.)
-            let room = ui.available_height();
-            egui::Panel::bottom("bottom")
-                .resizable(true)
-                .default_size((room * 0.48).clamp(160.0, 500.0))
+        if s.show_lists {
+            egui::Panel::right("lists")
+                .exact_size(event_list::WIDTH)
                 .frame(egui::Frame::new())
-                .show(ui, |ui| match s.bottom {
-                    Bottom::Mixer => mixer::show(ui, p, s, &meters),
-                    Bottom::PianoRoll => piano_roll::show(ui, p, s),
-                });
+                .show(ui, |ui| event_list::show(ui, p, s));
+        }
+        if s.show_mixer || s.bottom == Bottom::PianoRoll {
+            // About half of the space under the control bar (500 points at most), so the Tracks
+            // area keeps room on short screens. The Piano Roll can be pulled taller; the mixer
+            // has a fixed height, as in Logic: its strips have a natural size and a taller panel
+            // would only stretch the faders and meters. (It follows the window, so it is never
+            // outside its range when the window shrinks.)
+            let room = ui.available_height();
+            let usual = (room * 0.48).clamp(160.0, 500.0);
+            let panel = egui::Panel::bottom("bottom").frame(egui::Frame::new());
+            let panel = if s.bottom == Bottom::Mixer {
+                panel.resizable(false).exact_size(usual)
+            } else {
+                panel.resizable(true).default_size(usual)
+            };
+            panel.show(ui, |ui| match s.bottom {
+                Bottom::Mixer => mixer::show(ui, p, s, &meters),
+                Bottom::PianoRoll => piano_roll::show(ui, p, s),
+            });
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::new())
-            .show(ui, |ui| tracks_area::show(ui, p, s));
+            .show(ui, |ui| tracks_area::show(ui, p, s, &meters));
+
+        self.play_and_record_midi(&ctx);
+        if std::mem::take(&mut self.ui.update_check) {
+            self.updater.start_check(true);
+        }
+        let unsaved = || file_commands::content(&self.project) != self.saved;
+        if self.updater.show(&ctx, &unsaved) == updater::Action::Quit {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
 
         // Forward live notes (piano keys, note auditioning) to the engine.
         // Notes on tracks past the engine's limit are silent, like the rest of those tracks.
@@ -421,9 +517,16 @@ const APP_ICON_PNG: &[u8] = include_bytes!("../assets/icon-256.png");
 
 fn main() -> eframe::Result {
     bench::mark_start();
+    // Started by an update that is waiting for the program to close: put the update in place.
+    if updater::run_helper_if_requested() {
+        return Ok(());
+    }
     let all_args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let bench_out = bench::requested(&all_args);
     let shots_dir = bench::shots_requested(&all_args);
+    if bench_out.is_none() && shots_dir.is_none() {
+        updater::clean_up_after_update();
+    }
     // Measuring runs leave the user's settings (first launch, recent projects, size) alone.
     let measuring = bench_out.is_some() || shots_dir.is_some();
     // Release builds: on a crash, write a report to the temp folder instead of a raw panic.
@@ -501,7 +604,13 @@ fn main() -> eframe::Result {
                 bench: bench_out.clone().map(bench::Probe::new),
                 shots: shots_dir.clone().map(bench::LayoutShots::new),
                 frames_since_record: 0,
+                midi: (!measuring).then(midi_in::MidiIn::new),
+                updater: updater::Updater::new(),
             };
+            if !measuring {
+                app.ui.update_auto = updater::auto_enabled();
+                app.updater.check_at_startup();
+            }
             #[cfg(target_os = "macos")]
             {
                 app.native_menu = Some(native_menu::NativeMenu::install(&cc.egui_ctx));

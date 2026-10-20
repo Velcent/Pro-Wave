@@ -381,6 +381,8 @@ mod tests {
                 start_bar: 1.0,
                 len_bars: 1.0,
                 notes,
+                controls: Vec::new(),
+                folder: None,
                 audio: None,
                 params: RegionParams::default(),
             }],

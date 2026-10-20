@@ -6,14 +6,14 @@
 use crate::import::audio_region;
 use crate::library::CATEGORIES;
 use crate::model::{
-    Marker, Note, Project, Region, RegionParams, SendSlot, TempoPoint, Track, TrackKind,
-    TrackParams, MAX_REGION_GAIN, MIN_REGION_GAIN,
+    CompSegment, Control, Marker, Note, Project, Region, RegionParams, SendSlot, Take, TakeFolder,
+    TempoPoint, Track, TrackKind, TrackParams, MAX_REGION_GAIN, MIN_REGION_GAIN,
 };
 use egui::Color32;
 use prowave_engine::{AudioFile, FadeCurve};
 use prowave_project::{
-    media_path, MarkerDoc, MediaFile, NoteDoc, ProjectDoc, RegionDoc, TempoChangeDoc, TrackDoc,
-    TrackKindDoc,
+    media_path, CompDoc, ControlDoc, MarkerDoc, MediaFile, NoteDoc, ProjectDoc, RegionDoc, TakeDoc,
+    TempoChangeDoc, TrackDoc, TrackKindDoc,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -177,6 +177,51 @@ pub fn to_doc(p: &Project) -> (ProjectDoc, Vec<MediaFile>) {
                             vel: n.vel,
                         })
                         .collect(),
+                    controls: r
+                        .controls
+                        .iter()
+                        .map(|c| ControlDoc {
+                            start: c.start,
+                            num: c.num,
+                            val: c.val,
+                        })
+                        .collect(),
+                    takes: r.folder.as_ref().map_or_else(Vec::new, |f| {
+                        f.takes
+                            .iter()
+                            .map(|t| TakeDoc {
+                                notes: t
+                                    .notes
+                                    .iter()
+                                    .map(|n| NoteDoc {
+                                        start: n.start,
+                                        len: n.len,
+                                        pitch: n.pitch,
+                                        vel: n.vel,
+                                    })
+                                    .collect(),
+                                controls: t
+                                    .controls
+                                    .iter()
+                                    .map(|c| ControlDoc {
+                                        start: c.start,
+                                        num: c.num,
+                                        val: c.val,
+                                    })
+                                    .collect(),
+                            })
+                            .collect()
+                    }),
+                    comp: r.folder.as_ref().map_or_else(Vec::new, |f| {
+                        f.comp
+                            .iter()
+                            .map(|s| CompDoc {
+                                start: s.start,
+                                end: s.end,
+                                take: s.take as u32,
+                            })
+                            .collect()
+                    }),
                     audio: r.audio.as_ref().map(|a| {
                         by_source
                             .entry(a.file.path.clone())
@@ -241,6 +286,60 @@ pub fn to_doc(p: &Project) -> (ProjectDoc, Vec<MediaFile>) {
 
 /// Builds a project from `doc`; audio regions open their files from `media_dir`. Regions whose
 /// file is missing or unreadable are dropped and reported in the returned warnings.
+/// The take folder of a region document, if it has a sensible one: two or more takes and a
+/// comp of ordered stretches that point at them.
+fn folder_from_doc(r: &RegionDoc) -> Option<TakeFolder> {
+    if r.takes.len() < 2 || r.comp.is_empty() {
+        return None;
+    }
+    let takes: Vec<Take> = r
+        .takes
+        .iter()
+        .map(|t| Take {
+            notes: t
+                .notes
+                .iter()
+                .map(|n| Note {
+                    start: finite_in(n.start, 0.0, MAX_BEATS, 0.0),
+                    len: finite_in(n.len, 1.0 / 960.0, MAX_BEATS, 0.25),
+                    pitch: n.pitch.min(127),
+                    vel: n.vel.clamp(1, 127),
+                })
+                .collect(),
+            controls: t
+                .controls
+                .iter()
+                .map(|c| Control {
+                    start: finite_in(c.start, 0.0, MAX_BEATS, 0.0),
+                    num: c.num.min(127),
+                    val: c.val.min(127),
+                })
+                .collect(),
+        })
+        .collect();
+    let mut comp: Vec<CompSegment> = Vec::new();
+    for s in &r.comp {
+        let (start, end) = (
+            finite_in(s.start, 0.0, MAX_BEATS, 0.0),
+            finite_in(s.end, 0.0, MAX_BEATS, 0.0),
+        );
+        if end > start && (s.take as usize) < takes.len() {
+            comp.push(CompSegment {
+                start,
+                end,
+                take: s.take as usize,
+            });
+        }
+    }
+    let len = comp.last()?.end;
+    Some(TakeFolder {
+        takes,
+        comp,
+        len,
+        open: false,
+    })
+}
+
 pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Project, Vec<String>) {
     let mut warnings = Vec::new();
     let mut opened: HashMap<String, Option<AudioFile>> = HashMap::new();
@@ -271,7 +370,8 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
                     }
                 }
             };
-            regions.push(Region {
+            let folder = folder_from_doc(r);
+            let mut region = Region {
                 name: r.name.clone(),
                 start_bar: finite_in(r.start_bar, 1.0, MAX_BARS, 1.0),
                 len_bars: finite_in(r.len_bars, 1.0 / 64.0, MAX_BARS, 1.0),
@@ -285,6 +385,16 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
                         vel: n.vel.clamp(1, 127),
                     })
                     .collect(),
+                controls: r
+                    .controls
+                    .iter()
+                    .map(|c| Control {
+                        start: finite_in(c.start, 0.0, MAX_BEATS, 0.0),
+                        num: c.num.min(127),
+                        val: c.val.min(127),
+                    })
+                    .collect(),
+                folder: None,
                 audio,
                 params: RegionParams {
                     mute: r.mute,
@@ -297,7 +407,13 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
                     fade_curve: curve_from_name(&r.fade_curve),
                     reverse: r.reverse,
                 },
-            });
+            };
+            // A take folder's notes are what its comp plays.
+            if let Some(folder) = folder {
+                folder.apply(&mut region.notes, &mut region.controls);
+                region.folder = Some(folder);
+            }
+            regions.push(region);
         }
         tracks.push(Track {
             name: t.name.clone(),
@@ -692,5 +808,50 @@ pub(crate) mod tests {
             intern("Some Third-Party Plug-in"),
             "Some Third-Party Plug-in"
         );
+    }
+
+    #[test]
+    fn a_take_folder_and_its_sustain_events_survive_saving() {
+        use crate::model::{Control, Take, TakeFolder};
+        let mut p = Project::demo();
+        let note = |start: f32, pitch: u8| Note {
+            start,
+            len: 0.5,
+            pitch,
+            vel: 90,
+        };
+        let pedal = |val: u8| Control {
+            start: 0.0,
+            num: 64,
+            val,
+        };
+        let takes = vec![
+            Take {
+                notes: vec![note(0.0, 60), note(2.0, 62)],
+                controls: vec![pedal(127)],
+            },
+            Take {
+                notes: vec![note(1.0, 64)],
+                controls: vec![pedal(0)],
+            },
+        ];
+        let mut folder = TakeFolder::new(takes, 8.0);
+        folder.swipe(0, 0.0, 1.5);
+        let r = &mut p.tracks[0].regions[0];
+        folder.apply(&mut r.notes, &mut r.controls);
+        r.folder = Some(folder.clone());
+
+        let (doc, _) = to_doc(&p);
+        let (q, _) = from_doc(&doc, Path::new("."), &egui::Context::default());
+        let got = &q.tracks[0].regions[0];
+        let f = got.folder.as_ref().expect("the folder is back");
+        assert_eq!(f.takes, folder.takes);
+        assert_eq!(f.comp, folder.comp);
+        assert_eq!(f.len, 8.0);
+        assert!(!f.open, "opened or closed is not saved");
+        assert_eq!(got.notes, p.tracks[0].regions[0].notes);
+        assert_eq!(got.controls, p.tracks[0].regions[0].controls);
+        // An ordinary region stays ordinary.
+        assert!(q.tracks[1].regions[0].folder.is_none());
     }
 }

@@ -26,6 +26,42 @@ const LCD_TEXT: Color32 = Color32::from_rgb(0xe8, 0xe8, 0xe8);
 const LCD_MID: Color32 = Color32::from_rgb(0x9c, 0x9c, 0x9c);
 const LCD_DIM: Color32 = Color32::from_rgb(0x4e, 0x4e, 0x50);
 const PLAY_GREEN: Color32 = Color32::from_rgb(0x30, 0xa8, 0x4b);
+/// The LCD while recording turns red, as in Logic.
+const LCD_REC_BG: Color32 = Color32::from_rgb(19, 10, 10);
+const LCD_REC_TEXT: Color32 = Color32::from_rgb(244, 98, 86);
+const LCD_REC_MID: Color32 = Color32::from_rgb(170, 62, 54);
+const LCD_REC_DIM: Color32 = Color32::from_rgb(84, 30, 28);
+/// The record button's background while recording.
+const REC_BUTTON_ON: Color32 = Color32::from_rgb(165, 26, 22);
+
+/// The LCD's colours: normal or recording.
+struct LcdColors {
+    bg: Color32,
+    text: Color32,
+    mid: Color32,
+    dim: Color32,
+}
+
+impl LcdColors {
+    fn new(recording: bool) -> Self {
+        if recording {
+            Self {
+                bg: LCD_REC_BG,
+                text: LCD_REC_TEXT,
+                mid: LCD_REC_MID,
+                dim: LCD_REC_DIM,
+            }
+        } else {
+            Self {
+                bg: LCD_BG,
+                text: LCD_TEXT,
+                mid: LCD_MID,
+                dim: LCD_DIM,
+            }
+        }
+    }
+}
+
 const REC_RED: Color32 = Color32::from_rgb(0xe6, 0x34, 0x2c);
 const CYCLE_YELLOW: Color32 = Color32::from_rgb(0xe8, 0xa6, 0x2a);
 const PURPLE: Color32 = Color32::from_rgb(0x9b, 0x3f, 0xd6);
@@ -410,7 +446,14 @@ fn tbutton(
 }
 
 /// Appends `text`, drawing the first `dim` characters in the dim LCD colour.
-fn lcd_seg(job: &mut LayoutJob, text: &str, dim: usize, size: f32, color: Color32) {
+fn lcd_seg(
+    job: &mut LayoutJob,
+    text: &str,
+    dim: usize,
+    size: f32,
+    color: Color32,
+    dim_color: Color32,
+) {
     let split = text.char_indices().nth(dim).map_or(text.len(), |(i, _)| i);
     let font = FontId::proportional(size);
     if split > 0 {
@@ -419,7 +462,7 @@ fn lcd_seg(job: &mut LayoutJob, text: &str, dim: usize, size: f32, color: Color3
             0.0,
             TextFormat {
                 font_id: font.clone(),
-                color: LCD_DIM,
+                color: dim_color,
                 ..Default::default()
             },
         );
@@ -436,16 +479,28 @@ fn lcd_seg(job: &mut LayoutJob, text: &str, dim: usize, size: f32, color: Color3
 }
 
 /// "009 1 1 001"-style position with dim leading zeros.
-fn position_job(bbdt: (u32, u32, u32, u32), size: f32, color: Color32) -> LayoutJob {
+fn position_job(
+    bbdt: (u32, u32, u32, u32),
+    size: f32,
+    color: Color32,
+    dim_color: Color32,
+) -> LayoutJob {
     let (bar, beat, div, tick) = bbdt;
     let mut job = LayoutJob::default();
     let bar_s = format!("{bar:03}");
     let bar_dim = bar_s.len() - bar.to_string().len();
-    lcd_seg(&mut job, &bar_s, bar_dim, size, color);
-    lcd_seg(&mut job, &format!("  {beat}  {div}  "), 0, size, color);
+    lcd_seg(&mut job, &bar_s, bar_dim, size, color, dim_color);
+    lcd_seg(
+        &mut job,
+        &format!("  {beat}  {div}  "),
+        0,
+        size,
+        color,
+        dim_color,
+    );
     let tick_s = format!("{tick:03}");
     let tick_dim = tick_s.len() - tick.to_string().len();
-    lcd_seg(&mut job, &tick_s, tick_dim, size, color);
+    lcd_seg(&mut job, &tick_s, tick_dim, size, color, dim_color);
     job
 }
 
@@ -462,7 +517,8 @@ fn take_steps(leftover: &mut f32, delta_px: f32, px_per_step: f32) -> i32 {
 }
 
 fn lcd(ui: &Ui, g: &Painter, p: &mut Project, rect: Rect, cpu_load: f32) {
-    g.rect_filled(rect, 6.0, LCD_BG);
+    let pal = LcdColors::new(p.recording);
+    g.rect_filled(rect, 6.0, pal.bg);
     g.rect_stroke(
         rect,
         6.0,
@@ -475,13 +531,13 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, rect: Rect, cpu_load: f32) {
 
     // Column 1: SMPTE over bars/beats.
     let mut job = LayoutJob::default();
-    lcd_seg(&mut job, &p.timecode(), 0, 18.0, LCD_TEXT);
-    g.galley(pos2(x0 + 8.0, top), g.layout_job(job), LCD_TEXT);
+    lcd_seg(&mut job, &p.timecode(), 0, 18.0, pal.text, pal.dim);
+    g.galley(pos2(x0 + 8.0, top), g.layout_job(job), pal.text);
     let pos = p.bbdt(p.position_beats);
     g.galley(
         pos2(x0 + 14.0, bot),
-        g.layout_job(position_job(pos, 18.0, LCD_TEXT)),
-        LCD_TEXT,
+        g.layout_job(position_job(pos, 18.0, pal.text, pal.dim)),
+        pal.text,
     );
 
     // Column 2: left/right locators (dimmer).
@@ -489,13 +545,13 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, rect: Rect, cpu_load: f32) {
     let r = p.bbdt(p.cycle_end);
     g.galley(
         pos2(x0 + 158.0, top + 1.0),
-        g.layout_job(position_job(l, 15.0, LCD_MID)),
-        LCD_MID,
+        g.layout_job(position_job(l, 15.0, pal.mid, pal.dim)),
+        pal.mid,
     );
     g.galley(
         pos2(x0 + 158.0, bot + 1.0),
-        g.layout_job(position_job(r, 15.0, LCD_MID)),
-        LCD_MID,
+        g.layout_job(position_job(r, 15.0, pal.mid, pal.dim)),
+        pal.mid,
     );
 
     // Column 3: tempo (drag vertically to change it, like Logic).
@@ -515,14 +571,14 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, rect: Rect, cpu_load: f32) {
         Align2::CENTER_TOP,
         format!("{:.4}", p.tempo_at(p.position_beats)),
         FontId::proportional(18.0),
-        LCD_TEXT,
+        pal.text,
     );
     g.text(
         pos2(tempo_rect.center().x, bot + 2.0),
         Align2::CENTER_TOP,
         tr("Keep Tempo"),
         fitting_font(g, tr("Keep Tempo"), 13.5, 82.0),
-        LCD_TEXT,
+        pal.text,
     );
 
     // Column 4: time signature / division. Drag the numerator or the denominator up or down,
@@ -561,14 +617,14 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, rect: Rect, cpu_load: f32) {
         Align2::CENTER_TOP,
         format!("{}/{}", p.sig.0, p.sig.1),
         FontId::proportional(18.0),
-        LCD_TEXT,
+        pal.text,
     );
     g.text(
         pos2(sig_x + 3.0, bot + 1.0),
         Align2::CENTER_TOP,
         "/16",
         FontId::proportional(16.0),
-        LCD_TEXT,
+        pal.text,
     );
 
     // Column 5: MIDI in/out activity.
@@ -577,14 +633,14 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, rect: Rect, cpu_load: f32) {
         Align2::LEFT_TOP,
         tr("No In"),
         fitting_font(g, tr("No In"), 13.5, 84.0),
-        LCD_TEXT,
+        pal.text,
     );
     g.text(
         pos2(x0 + 386.0, bot + 2.0),
         Align2::LEFT_TOP,
         tr("No Out"),
         fitting_font(g, tr("No Out"), 13.5, 84.0),
-        LCD_TEXT,
+        pal.text,
     );
 
     // Column 6: CPU (audio-callback DSP load) / HD (disk; not measured yet) meters.
@@ -595,7 +651,7 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, rect: Rect, cpu_load: f32) {
             Align2::LEFT_CENTER,
             *label,
             FontId::proportional(7.0),
-            LCD_DIM,
+            pal.dim,
         );
         let m = Rect::from_min_size(pos2(x0 + 490.0, y - 2.0), vec2(40.0, 4.0));
         g.rect_filled(m, 1.0, Color32::from_gray(0x2c));
@@ -605,7 +661,7 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, rect: Rect, cpu_load: f32) {
             let color = if cpu_load >= 0.9 {
                 Color32::from_rgb(0xe0, 0x40, 0x30)
             } else {
-                LCD_TEXT
+                pal.text
             };
             g.rect_filled(fill, 1.0, color);
             let hover = m.expand2(vec2(14.0, 4.0)).with_min_x(x0 + 470.0);
@@ -629,7 +685,7 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, rect: Rect, cpu_load: f32) {
             c + vec2(0.0, 2.0),
             c + vec2(4.0, -2.0),
         ],
-        Stroke::new(1.6, LCD_MID),
+        Stroke::new(1.6, pal.mid),
     ));
     g.line_segment(
         [
@@ -826,7 +882,7 @@ pub fn control_bar(
     // Record: red dot (white dot on red while recording).
     let rec_r = Rect::from_center_size(tx(-76.0), vec2(30.0, 26.0));
     if p.recording {
-        g.rect_filled(rec_r, 6.0, REC_RED);
+        g.rect_filled(rec_r, 6.0, REC_BUTTON_ON);
     }
     g.circle_filled(
         rec_r.center(),
@@ -901,7 +957,12 @@ pub fn control_bar(
     let right: [IconFn; 4] = [icon_list_editors, icon_note_pad, icon_loops, icon_browsers];
     for (i, draw) in right.iter().enumerate() {
         let c = pos2(bar.right() - 106.0 + i as f32 * 27.5, cy);
-        let _ = tbutton(ui, &g, c, &format!("right{i}"), *draw, None, ICON);
+        // The first one is List Editors.
+        let on = (i == 0 && s.show_lists).then_some(crate::widgets::BLUE);
+        let color = if on.is_some() { Color32::WHITE } else { ICON };
+        if tbutton(ui, &g, c, &format!("right{i}"), *draw, on, color) && i == 0 {
+            s.show_lists = !s.show_lists;
+        }
     }
 }
 

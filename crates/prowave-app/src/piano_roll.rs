@@ -25,17 +25,37 @@ const TOOLBAR_H: f32 = 30.0;
 const INSPECTOR_W: f32 = 240.0;
 const KEYS_W: f32 = 48.0;
 const RULER_H: f32 = 22.0;
-const REGION_H: f32 = 16.0;
+const REGION_H: f32 = 18.0;
 const SB_H: f32 = 12.0;
 const VEL_H: f32 = 72.0;
 
 const PANEL_BG: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
 const TOOLBAR_BG: Color32 = Color32::from_rgb(0x3c, 0x3c, 0x3c);
-const ROW_WHITE: Color32 = Color32::from_rgb(0x2e, 0x2e, 0x2e);
-const ROW_BLACK: Color32 = Color32::from_rgb(0x25, 0x25, 0x25);
-const NOTE_GREEN: Color32 = Color32::from_rgb(0x7e, 0xc8, 0x4a);
+const ROW_WHITE: Color32 = Color32::from_rgb(26, 26, 26);
+const ROW_BLACK: Color32 = Color32::from_rgb(20, 20, 20);
 const NOTE_SEL: Color32 = Color32::from_rgb(0xe4, 0xff, 0xb0);
-const REGION_GREEN: Color32 = Color32::from_rgb(0xb2, 0xee, 0xa0);
+/// Logic's velocity colours for a note: green when soft, yellow, then red when hard.
+fn velocity_color(vel: u8) -> Color32 {
+    let t = (vel as f32 / 127.0).clamp(0.0, 1.0);
+    let green = Color32::from_rgb(60, 185, 70);
+    let yellow = Color32::from_rgb(232, 200, 40);
+    let red = Color32::from_rgb(216, 43, 40);
+    if t < 0.5 {
+        green.lerp_to_gamma(yellow, t / 0.5)
+    } else {
+        yellow.lerp_to_gamma(red, ((t - 0.5) / 0.37).min(1.0))
+    }
+}
+
+/// The bright bar colour Logic gives a region in the editor (a yellow track: 253, 197, 0).
+fn region_bar_color(c: Color32) -> Color32 {
+    let max = c.r().max(c.g()).max(c.b()).max(1) as f32;
+    let s = |v: u8| v as f32 * 253.0 / max;
+    let (r, g, b) = (s(c.r()), s(c.g()), s(c.b()));
+    let lum = 0.3 * r + 0.59 * g + 0.11 * b;
+    let k = |v: f32| (lum + (v - lum) * 1.3).clamp(0.0, 253.0) as u8;
+    Color32::from_rgb(k(r), k(g), k(b))
+}
 
 /// Live notes the Piano Roll wants to play; `main` forwards them to the engine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -484,11 +504,24 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         );
         return;
     };
+    // A take folder's notes are its comp: they are edited after it is flattened.
+    if p.tracks[ti].regions[ri].folder.is_some() {
+        g.text(
+            body.center(),
+            Align2::CENTER_CENTER,
+            tr("This is a take folder: flatten it to edit its notes"),
+            FontId::proportional(13.0),
+            TEXT_DIM,
+        );
+        return;
+    }
     let bpb = p.beats_per_bar();
     let (region_name, start_bar, len_beats) = {
         let r = &p.tracks[ti].regions[ri];
         (r.name.clone(), r.start_bar, r.len_bars * bpb as f32)
     };
+    let track_name = p.tracks[ti].name.clone();
+    let region_color = region_bar_color(p.tracks[ti].color);
     let position = p.position_beats - (start_bar as f64 - 1.0) * bpb;
 
     // Layout.
@@ -1026,23 +1059,36 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let iw = insp.width() - 24.0;
     let mut y = insp.top() + 10.0;
     let n_sel = v.selected.len();
-    let title = match n_sel {
-        0 => tr("No Notes selected").to_string(),
-        1 => tr("One Note selected").to_string(),
-        n => trf("{} Notes selected", &[&n]),
-    };
+    // Region header: icon, name and track, like Logic's MIDI region inspector.
+    let icon = Rect::from_min_size(pos2(ix, y - 2.0), vec2(26.0, 22.0));
+    crate::track_icons::draw_icon(&gi, icon, crate::track_icons::IconKind::Note);
+    let font = FontId::proportional(12.0);
+    let name = crate::mixer::elide(&gi, &region_name, &font, iw - 70.0);
     gi.text(
-        pos2(ix, y),
-        Align2::LEFT_TOP,
-        title,
-        FontId::proportional(12.5),
+        pos2(insp.center().x, y + 2.0),
+        Align2::CENTER_CENTER,
+        name,
+        font,
         TEXT,
     );
-    y += 17.0;
-    let font = FontId::proportional(11.0);
-    let shown = crate::mixer::elide(&gi, &trf("in {}", &[&region_name]), &font, iw);
-    gi.text(pos2(ix, y), Align2::LEFT_TOP, shown, font, TEXT_DIM);
-    y += 30.0;
+    let font = FontId::proportional(10.0);
+    let sub = crate::mixer::elide(&gi, &trf("on Track {}", &[&track_name]), &font, iw - 70.0);
+    gi.text(
+        pos2(insp.center().x, y + 16.0),
+        Align2::CENTER_CENTER,
+        sub,
+        font,
+        TEXT_DIM,
+    );
+    let box_r = Rect::from_min_size(pos2(ix + iw - 24.0, y), vec2(24.0, 18.0));
+    gi.rect_filled(box_r, 3.0, Color32::from_gray(0x4a));
+    gi.rect_stroke(
+        Rect::from_center_size(box_r.center(), vec2(10.0, 8.0)),
+        1.5,
+        Stroke::new(1.0, Color32::from_gray(0xc0)),
+        StrokeKind::Inside,
+    );
+    y += 46.0;
 
     gi.text(
         pos2(ix, y),
@@ -1204,6 +1250,42 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         }
     }
 
+    // Automation / MIDI: what the lane under the notes shows (Note Velocity).
+    let ay = insp.bottom() - 112.0;
+    if ay > y + 24.0 {
+        gi.text(
+            pos2(ix, ay),
+            Align2::LEFT_TOP,
+            tr("Automation/MIDI"),
+            FontId::proportional(11.5),
+            TEXT_DIM,
+        );
+        let power = Rect::from_min_size(pos2(ix, ay + 18.0), vec2(26.0, 20.0));
+        gi.rect_filled(power, 3.0, Color32::from_rgb(0x2a, 0x5a, 0xb0));
+        gi.circle_stroke(power.center(), 5.0, Stroke::new(1.3, Color32::WHITE));
+        let region_btn =
+            Rect::from_min_size(pos2(ix + 28.0, ay + 18.0), vec2(iw - 28.0 - 34.0, 20.0));
+        gi.rect_filled(region_btn, 0.0, BLUE);
+        gi.text(
+            region_btn.center(),
+            Align2::CENTER_CENTER,
+            tr("Region"),
+            FontId::proportional(11.5),
+            Color32::WHITE,
+        );
+        let curve = Rect::from_min_size(pos2(ix + iw - 30.0, ay + 18.0), vec2(30.0, 20.0));
+        gi.rect_filled(curve, 3.0, Color32::from_gray(0x4a));
+        let box_r = Rect::from_min_size(pos2(ix, ay + 42.0), vec2(iw, 44.0));
+        gi.rect_filled(box_r, 3.0, Color32::from_gray(0x30));
+        gi.text(
+            pos2(box_r.center().x, box_r.top() + 10.0),
+            Align2::CENTER_CENTER,
+            tr("Note Velocity"),
+            FontId::proportional(11.5),
+            Color32::from_rgb(0x4c, 0xe0, 0x4c),
+        );
+    }
+
     let hint = tr("Click: add · Drag: select · Del/Right-click: delete");
     let hint_font = FontId::proportional(10.5);
     let hint_text = crate::mixer::elide(&gi, hint, &hint_font, iw);
@@ -1297,31 +1379,18 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             continue;
         }
         let selected = v.selected.contains(&i);
-        let shade = 0.62 + n.vel as f32 / 127.0 * 0.38;
-        let base = if selected {
-            NOTE_SEL
+        // Logic draws a note with a light edge of its velocity colour around a deeper body.
+        let color = velocity_color(n.vel);
+        let (fill, edge) = if selected {
+            (NOTE_SEL, Color32::WHITE)
         } else {
-            NOTE_GREEN.gamma_multiply(shade)
+            (
+                color.lerp_to_gamma(Color32::from_gray(0x80), 0.3),
+                color.lerp_to_gamma(Color32::WHITE, 0.65),
+            )
         };
-        gg.rect_filled(r, 2.0, base);
-        gg.rect_filled(
-            Rect::from_min_size(r.min, vec2(r.width(), (r.height() * 0.4).max(1.0))),
-            2.0,
-            Color32::from_white_alpha(if selected { 70 } else { 36 }),
-        );
-        gg.rect_stroke(
-            r,
-            2.0,
-            Stroke::new(
-                1.0,
-                if selected {
-                    Color32::WHITE
-                } else {
-                    Color32::from_black_alpha(120)
-                },
-            ),
-            StrokeKind::Inside,
-        );
+        gg.rect_filled(r, 1.5, fill);
+        gg.rect_stroke(r, 1.5, Stroke::new(1.0, edge), StrokeKind::Inside);
     }
     if let Drag::Marquee { from } = &v.drag {
         if let Some(now) = ui.input(|i| i.pointer.hover_pos()) {
@@ -1372,13 +1441,15 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         let col = if v.selected.contains(&i) {
             NOTE_SEL
         } else {
-            NOTE_GREEN
+            Color32::from_rgb(115, 197, 113)
         };
+        // Logic shows each note's velocity as a dot with a line along the note.
+        let end = x_of(n.start + n.len);
         gv.line_segment(
-            [pos2(x, vel_rect.bottom()), pos2(x, top)],
-            Stroke::new(2.0, col),
+            [pos2(x, top), pos2(end.max(x + 2.0), top)],
+            Stroke::new(1.5, col),
         );
-        gv.circle_filled(pos2(x, top), 3.5, col);
+        gv.circle_filled(pos2(x, top), 2.5, Color32::from_rgb(131, 218, 127));
     }
 
     // Ruler (absolute bar numbers) and region strip.
@@ -1392,8 +1463,21 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             pos2(editor.right(), grid.top()),
         ),
         0.0,
-        Color32::from_gray(0x36),
+        Color32::from_gray(0x1f),
     );
+    // The part of the ruler over the region is gold, as in Logic.
+    let ruler_gold = Color32::from_rgb(
+        (region_color.r() as f32 * 0.66) as u8,
+        (region_color.g() as f32 * 0.64) as u8,
+        (region_color.b() as f32 * 0.64) as u8,
+    );
+    let gold = Rect::from_min_max(
+        pos2(rx0.max(grid.left()), ruler.top()),
+        pos2(rx1.min(grid.right()), ruler.bottom()),
+    );
+    if gold.width() > 0.0 {
+        gr.rect_filled(gold, 0.0, ruler_gold);
+    }
     let label_every = [1i32, 2, 4, 8, 16]
         .into_iter()
         .find(|n| *n as f32 * bpb as f32 * beat_px >= 36.0)
@@ -1423,7 +1507,13 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         pos2(rx1.min(region_bar.right()), region_bar.bottom()),
     );
     if strip.width() > 0.0 {
-        gr.rect_filled(strip, 2.0, REGION_GREEN);
+        gr.rect_filled(strip, 0.0, region_color);
+        gr.rect_stroke(
+            strip,
+            0.0,
+            Stroke::new(1.0, Color32::from_rgb(27, 21, 14)),
+            StrokeKind::Inside,
+        );
         gr.text(
             pos2(strip.left() + 6.0, strip.center().y),
             Align2::LEFT_CENTER,
@@ -1443,7 +1533,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     if px >= grid.left() && px <= grid.right() {
         gg.line_segment(
             [pos2(px, grid.top()), pos2(px, grid.bottom())],
-            Stroke::new(1.0, Color32::from_gray(0xe0)),
+            Stroke::new(1.0, crate::tracks_area::playhead_colors(p.recording).0),
         );
         gr.add(Shape::convex_polygon(
             vec![
@@ -1451,7 +1541,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
                 pos2(px + 5.0, ruler.top() + 2.0),
                 pos2(px, ruler.top() + 10.0),
             ],
-            Color32::from_gray(0xd0),
+            crate::tracks_area::playhead_colors(p.recording).1,
             Stroke::NONE,
         ));
     }

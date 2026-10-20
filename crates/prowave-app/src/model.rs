@@ -26,12 +26,48 @@ impl TrackKind {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Note {
     pub start: f32, // beats from region start
     pub len: f32,
     pub pitch: u8,
     pub vel: u8,
+}
+
+/// One pass of a cycle recording.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Take {
+    pub notes: Vec<Note>,
+    pub controls: Vec<Control>,
+}
+
+/// A stretch of a take folder (beats from the region start) that plays this take.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CompSegment {
+    pub start: f32,
+    pub end: f32,
+    pub take: usize,
+}
+
+/// Logic's take folder: several takes of the same passage and the comp that plays one of
+/// them in each stretch. See `takes.rs`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TakeFolder {
+    pub takes: Vec<Take>,
+    /// Sorted, without gaps or overlaps, covering `0..len`.
+    pub comp: Vec<CompSegment>,
+    /// Length of the folder in beats.
+    pub len: f32,
+    /// Shown opened, with a row for each take (not saved).
+    pub open: bool,
+}
+
+/// A MIDI controller event in a region (the sustain pedal is controller 64).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Control {
+    pub start: f32, // beats from region start
+    pub num: u8,
+    pub val: u8,
 }
 
 #[derive(Clone)]
@@ -40,6 +76,12 @@ pub struct Region {
     pub start_bar: f32,
     pub len_bars: f32,
     pub notes: Vec<Note>,
+    /// Controller events recorded with the notes.
+    pub controls: Vec<Control>,
+    /// A take folder: the takes of a cycle recording and the comp that picks among them. The
+    /// region's own `notes` and `controls` are then the comp, kept up to date by
+    /// [`TakeFolder::apply`].
+    pub folder: Option<TakeFolder>,
     /// Set for audio regions backed by a file on disk.
     pub audio: Option<AudioRegion>,
     /// Region inspector parameters (non-destructive, applied when the song is built).
@@ -346,6 +388,8 @@ impl Project {
                 } else {
                     demo_notes(seed, 12.0, 50, 76)
                 },
+                controls: Vec::new(),
+                folder: None,
                 audio: None,
                 params: RegionParams::default(),
             }],

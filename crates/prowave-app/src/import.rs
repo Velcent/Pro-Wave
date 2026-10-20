@@ -64,6 +64,8 @@ pub fn import_audio(p: &mut Project, path: &Path, ctx: &egui::Context) -> Result
             start_bar: start_bar as f32,
             len_bars: len_bars as f32,
             notes: vec![],
+            controls: Vec::new(),
+            folder: None,
             audio: Some(audio_region(file, ctx)),
             params: RegionParams::default(),
         }],

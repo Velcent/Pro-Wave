@@ -357,6 +357,8 @@ mod tests {
             bench: None,
             shots: None,
             frames_since_record: 0,
+            midi: None,
+            updater: crate::updater::Updater::new(),
         }
     }
 

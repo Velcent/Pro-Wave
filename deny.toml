@@ -31,6 +31,9 @@ allow = [
     "Unicode-3.0",
     "MPL-2.0",
     "OFL-1.1",
+    # The list of trusted certificate authorities (webpki-roots / webpki-root-certs, pulled in
+    # by the update check's HTTPS client). A permissive licence for data.
+    "CDLA-Permissive-2.0",
     "Ubuntu-font-1.0",
     "GPL-3.0-or-later",
 ]

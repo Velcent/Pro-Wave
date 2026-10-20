@@ -140,6 +140,8 @@ pub struct TracksView {
     pub lanes_w: f32,
     grab_beats: f64,
     cycle_anchor: Option<f64>,
+    /// A swipe on a take row in progress: the comp as it was and where the swipe began.
+    swipe: Option<(Vec<crate::model::CompSegment>, f32)>,
     /// Normalize Region Gain scans still running.
     pub normalize_jobs: Vec<NormalizeJob>,
 }
@@ -160,6 +162,7 @@ impl Default for TracksView {
             selected: None,
             grab_beats: 0.0,
             cycle_anchor: None,
+            swipe: None,
             normalize_jobs: Vec::new(),
         }
     }
@@ -169,6 +172,34 @@ impl Default for TracksView {
 /// (Logic plays only soloed tracks and greys the others' regions).
 pub(crate) fn silenced_by_solo(p: &Project, track: usize) -> bool {
     p.tracks.get(track).is_some_and(|t| !t.solo) && p.tracks.iter().any(|t| t.solo)
+}
+
+/// A region while it is being recorded.
+const RECORDING_FILL: Color32 = Color32::from_rgb(86, 14, 14);
+
+/// The outline of a selected region.
+const SELECTED_EDGE: Color32 = Color32::from_rgb(176, 200, 72);
+
+/// The ruler over a selected region is gold.
+const RULER_SELECTION: Color32 = Color32::from_rgb(169, 126, 25);
+const RULER_SELECTION_EDGE: Color32 = Color32::from_rgb(95, 69, 20);
+
+/// Logic's playhead is yellow: a pale yellow line and a yellow head.
+pub(crate) const PLAYHEAD_LINE: Color32 = Color32::from_rgb(214, 196, 112);
+pub(crate) const PLAYHEAD_HEAD: Color32 = Color32::from_rgb(240, 206, 84);
+pub(crate) const PLAYHEAD_EDGE: Color32 = Color32::from_rgb(146, 118, 30);
+/// While recording the playhead turns red.
+const PLAYHEAD_LINE_REC: Color32 = Color32::from_rgb(176, 42, 38);
+const PLAYHEAD_HEAD_REC: Color32 = Color32::from_rgb(206, 32, 26);
+const PLAYHEAD_EDGE_REC: Color32 = Color32::from_rgb(112, 16, 14);
+
+/// The playhead's line, head and outline colours.
+pub(crate) fn playhead_colors(recording: bool) -> (Color32, Color32, Color32) {
+    if recording {
+        (PLAYHEAD_LINE_REC, PLAYHEAD_HEAD_REC, PLAYHEAD_EDGE_REC)
+    } else {
+        (PLAYHEAD_LINE, PLAYHEAD_HEAD, PLAYHEAD_EDGE)
+    }
 }
 
 /// Half the width of the playhead head's grab zone in the ruler.
@@ -194,7 +225,7 @@ fn row_layout(p: &Project, row_h: f32) -> Vec<(f32, f32)> {
             let h = if p.hidden_by_fold(i) {
                 0.0
             } else {
-                (row_h * t.height).round().max(1.0)
+                (row_h * t.height).round().max(1.0) + take_rows_height(t)
             };
             let row = (top, h);
             top += h;
@@ -752,6 +783,8 @@ enum CtxAction {
     OpenPianoRoll,
     ToggleRegionMute(usize, usize),
     ToggleReverse(usize, usize),
+    ToggleTakeFolder(usize, usize),
+    FlattenTakeFolder(usize, usize),
     Normalize(usize, usize),
     RepeatRegion,
     LocatorsByRegion,
@@ -797,6 +830,7 @@ fn region_items(
     ui: &mut Ui,
     is_audio: bool,
     muted: bool,
+    folder: Option<bool>,
     ti: usize,
     ri: usize,
     picked: &mut Option<CtxAction>,
@@ -807,6 +841,22 @@ fn region_items(
             tr("Open in Piano Roll"),
             "",
             CtxAction::OpenPianoRoll,
+            picked,
+        );
+        ui.separator();
+    }
+    if let Some(open) = folder {
+        let toggle = if open {
+            tr("Close Take Folder")
+        } else {
+            tr("Open Take Folder")
+        };
+        pick(ui, toggle, "", CtxAction::ToggleTakeFolder(ti, ri), picked);
+        pick(
+            ui,
+            tr("Flatten Take Folder"),
+            "",
+            CtxAction::FlattenTakeFolder(ti, ri),
             picked,
         );
         ui.separator();
@@ -915,6 +965,22 @@ fn apply_ctx(action: CtxAction, p: &mut Project, s: &mut UiState, lanes_w: f32) 
             if let Some(region) = p.tracks.get_mut(t).and_then(|t| t.regions.get_mut(r)) {
                 region.params.mute = !region.params.mute;
                 p.song_rev += 1;
+            }
+        }
+        CtxAction::ToggleTakeFolder(t, r) => {
+            if let Some(f) = p
+                .tracks
+                .get_mut(t)
+                .and_then(|t| t.regions.get_mut(r))
+                .and_then(|r| r.folder.as_mut())
+            {
+                f.open = !f.open;
+            }
+        }
+        // The comp as it is becomes an ordinary region: the other takes are let go.
+        CtxAction::FlattenTakeFolder(t, r) => {
+            if let Some(region) = p.tracks.get_mut(t).and_then(|t| t.regions.get_mut(r)) {
+                region.folder = None;
             }
         }
         CtxAction::ToggleReverse(t, r) => {
@@ -1099,6 +1165,305 @@ pub(crate) fn zoom_to_fit(p: &Project, v: &mut TracksView, lanes_w: f32) {
 
 // ------------------------------------------------------------------ drawing
 
+/// The body colour of a region. Logic draws regions deeper than the track colour; these four
+/// were measured from Logic Pro itself (yellow is estimated from the others).
+const LOGIC_REGION_COLORS: [([u8; 3], [u8; 3]); 4] = [
+    ([0x4e, 0xb0, 0x4a], [43, 150, 53]),
+    ([0x3f, 0x5f, 0xc0], [60, 102, 176]),
+    ([0xd9, 0xaa, 0x2a], [196, 158, 26]),
+    ([0x7a, 0x4f, 0xc0], [97, 63, 175]),
+];
+
+/// A selected region keeps its colour but gets deeper and more saturated (Logic: a green
+/// region goes from 43, 150, 53 to 15, 136, 29).
+fn selected_fill(c: Color32) -> Color32 {
+    let (r, g, b) = (c.r() as f32, c.g() as f32, c.b() as f32);
+    let lum = 0.3 * r + 0.59 * g + 0.11 * b;
+    let k = |v: f32| ((lum + (v - lum) * 1.45) * 0.8).clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(k(r), k(g), k(b))
+}
+
+fn region_fill(c: Color32) -> Color32 {
+    if let Some((_, [r, g, b])) = LOGIC_REGION_COLORS
+        .iter()
+        .find(|(track, _)| *track == [c.r(), c.g(), c.b()])
+    {
+        return Color32::from_rgb(*r, *g, *b);
+    }
+    // Any other colour gets the same kind of darkening.
+    let ch = |v: u8| v as f32 * 0.72;
+    let (r, g, b) = (ch(c.r()), ch(c.g()), ch(c.b()));
+    let lum = 0.3 * r + 0.59 * g + 0.11 * b;
+    let sat = |v: f32| (lum + (v - lum) * 1.1).clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(sat(r), sat(g), sat(b))
+}
+
+// ------------------------------------------------------------------ take folders
+
+/// Height of one take's row in an opened take folder.
+const TAKE_ROW_H: f32 = 22.0;
+/// The yellow header of a take folder.
+const FOLDER_HEAD_H: f32 = 14.0;
+/// Logic's take folder header is yellow.
+const FOLDER_YELLOW: Color32 = Color32::from_rgb(253, 197, 0);
+
+/// Extra height a track's row needs for its opened take folders (one row per take).
+fn take_rows_height(t: &Track) -> f32 {
+    t.regions
+        .iter()
+        .filter_map(|r| r.folder.as_ref())
+        .filter(|f| f.open)
+        .map(|f| f.takes.len() as f32 * TAKE_ROW_H)
+        .fold(0.0, f32::max)
+}
+
+/// The triangle that opens and closes a take folder, at the left of its header.
+fn folder_toggle_rect(full: Rect) -> Rect {
+    Rect::from_min_size(full.min, vec2(16.0, FOLDER_HEAD_H))
+}
+
+/// The row of take number `take` (0 = first take) in an opened folder: the latest take is on
+/// top, as in Logic. `full` is the folder's own rectangle.
+fn take_row_rect(full: Rect, takes: usize, take: usize) -> Rect {
+    let k = takes - 1 - take;
+    Rect::from_min_size(
+        pos2(full.left(), full.bottom() + 1.0 + k as f32 * TAKE_ROW_H),
+        vec2(full.width(), TAKE_ROW_H - 2.0),
+    )
+}
+
+/// Thin note lines (pitch up, time right) of `notes` in `inner`, clipped to `clip`.
+#[allow(clippy::too_many_arguments)]
+fn draw_note_lines<'a>(
+    g: &Painter,
+    inner: Rect,
+    left: f32,
+    beat_px: f32,
+    notes: impl Iterator<Item = &'a crate::model::Note>,
+    lo: f32,
+    hi: f32,
+    ink: Color32,
+) {
+    let step = (2.0f32).min((inner.height() - 4.0) / (hi - lo).max(1.0));
+    let mid = (lo + hi) / 2.0;
+    for n in notes {
+        let nx = left + n.start * beat_px;
+        if nx > inner.right() || nx + n.len * beat_px < inner.left() {
+            continue;
+        }
+        let ny = inner.center().y - (n.pitch as f32 - mid) * step;
+        let nr = Rect::from_min_max(
+            pos2(nx.max(inner.left()), ny - 0.75),
+            pos2(
+                (nx + (n.len * beat_px).max(2.0)).min(inner.right()),
+                ny + 0.75,
+            ),
+        );
+        g.rect_filled(nr, 0.0, ink);
+    }
+}
+
+/// A take folder as Logic draws it: a yellow header with the name and a triangle, and under
+/// it the comp, the stretches of the takes that play, side by side with thin lines between.
+/// Opened, a row for each take follows, the stretches the comp uses lit in the region colour.
+#[allow(clippy::too_many_arguments)]
+fn draw_take_folder(
+    g: &Painter,
+    full: Rect,
+    track: &Track,
+    region: &Region,
+    folder: &crate::model::TakeFolder,
+    beat_px: f32,
+    selected: bool,
+    silenced: bool,
+) {
+    let base = if region.params.mute {
+        Color32::from_gray(0x6a)
+    } else {
+        track.color
+    };
+    let fill = if silenced {
+        Color32::from_rgb(0x2e, 0x2e, 0x30)
+    } else if selected {
+        selected_fill(region_fill(base))
+    } else {
+        region_fill(base)
+    };
+    let ink = if silenced {
+        Color32::from_gray(0x8c)
+    } else {
+        fill.lerp_to_gamma(Color32::WHITE, if selected { 0.75 } else { 0.6 })
+    };
+    let head_h = FOLDER_HEAD_H.min(full.height() * 0.4);
+    let round = 4;
+    let body = Rect::from_min_max(pos2(full.left(), full.top() + head_h), full.max);
+    // The comp: one block per stretch, rounded at the ends of the folder only.
+    let last = folder.comp.len().saturating_sub(1);
+    for (i, seg) in folder.comp.iter().enumerate() {
+        let x0 = (full.left() + seg.start * beat_px).max(full.left());
+        let x1 = (full.left() + seg.end * beat_px).min(full.right());
+        if x1 <= x0 {
+            continue;
+        }
+        g.rect_filled(
+            Rect::from_min_max(pos2(x0, body.top()), pos2(x1, body.bottom())),
+            egui::CornerRadius {
+                nw: 0,
+                ne: 0,
+                sw: if i == 0 { round } else { 0 },
+                se: if i == last { round } else { 0 },
+            },
+            fill,
+        );
+    }
+    // The header.
+    let head = Rect::from_min_size(full.min, vec2(full.width(), head_h));
+    let head_fill = if silenced {
+        Color32::from_gray(0x70)
+    } else {
+        FOLDER_YELLOW
+    };
+    g.rect_filled(
+        head,
+        egui::CornerRadius {
+            nw: round,
+            ne: round,
+            sw: 0,
+            se: 0,
+        },
+        head_fill,
+    );
+    let dark = Color32::from_rgb(40, 30, 0);
+    // The triangle: pointing right when closed, down when opened.
+    let c = pos2(full.left() + 8.0, head.center().y);
+    let tri = if folder.open {
+        vec![
+            c + vec2(-3.5, -2.0),
+            c + vec2(3.5, -2.0),
+            c + vec2(0.0, 3.0),
+        ]
+    } else {
+        vec![
+            c + vec2(-2.0, -3.5),
+            c + vec2(-2.0, 3.5),
+            c + vec2(3.0, 0.0),
+        ]
+    };
+    g.add(Shape::convex_polygon(tri, dark, Stroke::NONE));
+    g.text(
+        head.left_center() + vec2(16.0, 0.0),
+        Align2::LEFT_CENTER,
+        &region.name,
+        FontId::proportional(10.5),
+        dark,
+    );
+    // Where one stretch gives way to the next: a notch in the header and a line below it.
+    for seg in folder.comp.iter().skip(1) {
+        let x = full.left() + seg.start * beat_px;
+        if x <= full.left() || x >= full.right() {
+            continue;
+        }
+        g.line_segment(
+            [pos2(x, head.bottom() - 4.0), pos2(x, head.bottom())],
+            Stroke::new(1.0, dark),
+        );
+        g.line_segment(
+            [pos2(x, body.top()), pos2(x, body.bottom())],
+            Stroke::new(1.0, Color32::from_black_alpha(150)),
+        );
+    }
+    // What the comp plays.
+    let (lo, hi) = pitch_range(&region.notes);
+    let inner = Rect::from_min_max(
+        pos2(body.left(), body.top() + 2.0),
+        body.max - vec2(0.0, 2.0),
+    );
+    draw_note_lines(
+        g,
+        inner,
+        full.left(),
+        beat_px,
+        region.notes.iter(),
+        lo,
+        hi,
+        ink,
+    );
+    let border = if selected {
+        SELECTED_EDGE
+    } else {
+        Color32::from_black_alpha(110)
+    };
+    g.rect_stroke(
+        full,
+        egui::CornerRadius::same(round),
+        Stroke::new(1.0, border),
+        StrokeKind::Inside,
+    );
+
+    // The takes, newest on top.
+    if folder.open {
+        for (take_idx, take) in folder.takes.iter().enumerate() {
+            let row = take_row_rect(full, folder.takes.len(), take_idx);
+            g.rect_filled(row, 3.0, Color32::from_gray(0x3a));
+            let row_inner =
+                Rect::from_min_max(pos2(row.left(), row.top() + 2.0), row.max - vec2(0.0, 2.0));
+            let (lo, hi) = pitch_range(&take.notes);
+            // The stretches of this take that the comp plays are lit.
+            for seg in folder.comp.iter().filter(|s| s.take == take_idx) {
+                let x0 = (full.left() + seg.start * beat_px).max(full.left());
+                let x1 = (full.left() + seg.end * beat_px).min(full.right());
+                if x1 > x0 {
+                    g.rect_filled(
+                        Rect::from_min_max(pos2(x0, row.top()), pos2(x1, row.bottom())),
+                        3.0,
+                        fill,
+                    );
+                }
+            }
+            let used = |start: f32| {
+                folder
+                    .comp
+                    .iter()
+                    .any(|s| s.take == take_idx && start >= s.start && start < s.end)
+            };
+            draw_note_lines(
+                g,
+                row_inner,
+                full.left(),
+                beat_px,
+                take.notes.iter().filter(|n| used(n.start)),
+                lo,
+                hi,
+                ink,
+            );
+            draw_note_lines(
+                g,
+                row_inner,
+                full.left(),
+                beat_px,
+                take.notes.iter().filter(|n| !used(n.start)),
+                lo,
+                hi,
+                Color32::from_gray(0x86),
+            );
+            g.text(
+                row.left_top() + vec2(5.0, 1.0),
+                Align2::LEFT_TOP,
+                trf("Take {}", &[&(take_idx + 1)]),
+                FontId::proportional(9.5),
+                Color32::from_white_alpha(200),
+            );
+        }
+    }
+}
+
+/// Lowest and highest pitch of `notes` (a default span when there are none).
+fn pitch_range(notes: &[crate::model::Note]) -> (f32, f32) {
+    let lo = notes.iter().map(|n| n.pitch).min().unwrap_or(48) as f32;
+    let hi = notes.iter().map(|n| n.pitch).max().unwrap_or(72) as f32;
+    (lo, hi)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_region(
     g: &Painter,
@@ -1108,6 +1473,7 @@ fn draw_region(
     region: &Region,
     beat_px: f32,
     selected: bool,
+    recording: bool,
     silenced: bool,
     seed: u32,
 ) {
@@ -1117,14 +1483,17 @@ fn draw_region(
     } else {
         track.color
     };
-    let body = if silenced {
+    let body = if recording {
+        // The region being recorded is red until the recording stops.
+        RECORDING_FILL
+    } else if silenced {
         // Another track is soloed: dark grey body, grey content, name in the track colour.
         Color32::from_rgb(0x2e, 0x2e, 0x30)
             .lerp_to_gamma(Color32::WHITE, if selected { 0.06 } else { 0.0 })
     } else if selected {
-        base.lerp_to_gamma(Color32::WHITE, 0.18)
+        selected_fill(region_fill(base))
     } else {
-        base
+        region_fill(base)
     };
     g.rect_filled(rr, 3.0, body);
     let head_h = 14.0f32.min(rr.height() * 0.4);
@@ -1137,12 +1506,12 @@ fn draw_region(
             sw: 0,
             se: 0,
         },
-        body.lerp_to_gamma(Color32::WHITE, if silenced { 0.03 } else { 0.22 }),
+        body.lerp_to_gamma(Color32::WHITE, if silenced { 0.03 } else { 0.0 }),
     );
     let name_color = if silenced {
         base.lerp_to_gamma(Color32::WHITE, 0.15)
     } else {
-        Color32::from_white_alpha(235)
+        body.lerp_to_gamma(Color32::WHITE, if selected { 0.7 } else { 0.85 })
     };
     g.text(
         head.left_center() + vec2(5.0, 0.0),
@@ -1155,10 +1524,13 @@ fn draw_region(
         pos2(rr.left(), head.bottom() + 2.0),
         rr.max - vec2(0.0, 2.0),
     );
-    let ink = if silenced {
+    let ink = if recording {
+        Color32::from_rgb(236, 152, 155)
+    } else if silenced {
         Color32::from_gray(0x8c)
     } else {
-        Color32::from_white_alpha(if selected { 235 } else { 205 })
+        // Logic draws the content in a pale tint of the region colour, not pure white.
+        body.lerp_to_gamma(Color32::WHITE, if selected { 0.75 } else { 0.6 })
     };
     let edit = region.audio.is_some() || track.kind == TrackKind::Audio;
     if let Some(peaks) = region.audio.as_ref().and_then(|a| a.peaks.get()) {
@@ -1178,19 +1550,20 @@ fn draw_region(
     } else if !region.notes.is_empty() {
         let lo = region.notes.iter().map(|n| n.pitch).min().unwrap_or(48) as f32;
         let hi = region.notes.iter().map(|n| n.pitch).max().unwrap_or(72) as f32;
+        // Logic keeps a fixed, small step per semitone and centres the notes in the region.
+        let step = (2.0f32).min((inner.height() - 4.0) / (hi - lo).max(1.0));
+        let mid = (lo + hi) / 2.0;
         for n in &region.notes {
             let nx = full.left() + n.start * beat_px;
             if nx > inner.right() || nx + n.len * beat_px < inner.left() {
                 continue;
             }
-            let ny = inner.bottom()
-                - 2.0
-                - (n.pitch as f32 - lo) / (hi - lo).max(1.0) * (inner.height() - 4.0);
+            let ny = inner.center().y - (n.pitch as f32 - mid) * step;
             let nr = Rect::from_min_max(
-                pos2(nx.max(inner.left()), ny - 1.0),
+                pos2(nx.max(inner.left()), ny - 0.75),
                 pos2(
                     (nx + (n.len * beat_px).max(2.0)).min(inner.right()),
-                    ny + 1.0,
+                    ny + 0.75,
                 ),
             );
             g.rect_filled(nr, 0.0, ink);
@@ -1199,13 +1572,24 @@ fn draw_region(
     if edit {
         draw_fades(g, rr, inner, full, region, beat_px);
     }
-    let border = if selected {
-        Color32::WHITE
+    let border = if recording {
+        Color32::from_rgb(120, 22, 22)
+    } else if selected {
+        SELECTED_EDGE
     } else if silenced {
         Color32::from_gray(0x44)
     } else {
         Color32::from_black_alpha(110)
     };
+    if selected && !recording {
+        // Logic outlines a selected region in yellow-green with a dark line around it.
+        g.rect_stroke(
+            rr,
+            3.0,
+            Stroke::new(1.0, Color32::from_black_alpha(220)),
+            StrokeKind::Outside,
+        );
+    }
     g.rect_stroke(rr, 3.0, Stroke::new(1.0, border), StrokeKind::Inside);
 }
 
@@ -1371,9 +1755,43 @@ fn folder_buttons(ui: &Ui, g: &Painter, p: &mut Project, i: usize, x: f32, y: f3
     }
 }
 
+const SLIDER_W: f32 = 58.0;
+const SLIDER_H: f32 = 14.0;
+
+/// Where 0 dB sits on a track header's volume slider (Logic puts unity about two thirds up).
+const SLIDER_UNITY: f32 = 0.65;
+
+/// Slider position (0..1) for a volume in dB (-60..+6): most of the travel is below unity,
+/// the last third is the boost to +6 dB.
+fn db_to_slider(db: f32) -> f32 {
+    let db = db.clamp(-60.0, 6.0);
+    if db >= 0.0 {
+        SLIDER_UNITY + (1.0 - SLIDER_UNITY) * db / 6.0
+    } else {
+        SLIDER_UNITY * ((db + 60.0) / 60.0).sqrt()
+    }
+}
+
+fn slider_to_db(f: f32) -> f32 {
+    let f = f.clamp(0.0, 1.0);
+    if f >= SLIDER_UNITY {
+        (f - SLIDER_UNITY) / (1.0 - SLIDER_UNITY) * 6.0
+    } else {
+        -60.0 + 60.0 * (f / SLIDER_UNITY).powi(2)
+    }
+}
+
 /// Draws track `i`'s header and returns the response of its background (for the right-click
 /// menu; the buttons on it handle their own clicks).
-fn header(ui: &Ui, g: &Painter, p: &mut Project, i: usize, hdr: Rect) -> egui::Response {
+fn header(
+    ui: &Ui,
+    g: &Painter,
+    p: &mut Project,
+    i: usize,
+    hdr: Rect,
+    peaks: (f32, f32),
+    silenced: bool,
+) -> egui::Response {
     let selected = p.selected_track == i;
     g.rect_filled(hdr, 0.0, if selected { HEADER_SEL } else { HEADER_BG });
     g.line_segment(
@@ -1511,26 +1929,61 @@ fn header(ui: &Ui, g: &Painter, p: &mut Project, i: usize, hdr: Rect) -> egui::R
     }
 
     // Volume slider (dB, -60..+6; double-click resets to 0 dB) and pan knob.
+    // Logic's slider: a dark pill with a grey thumb that stays inside it.
     let sl = Rect::from_min_size(
-        pos2(hdr.right() - 112.0, hdr.center().y - 3.0),
-        vec2(70.0, 6.0),
+        pos2(hdr.right() - 98.0, hdr.center().y - SLIDER_H / 2.0),
+        vec2(SLIDER_W, SLIDER_H),
     );
+    let travel = (sl.left() + SLIDER_H / 2.0, sl.right() - SLIDER_H / 2.0);
     let resp = ui.interact(
-        sl.expand2(vec2(4.0, 8.0)),
+        sl.expand2(vec2(4.0, 6.0)),
         id(("vol", i)),
         Sense::click_and_drag(),
     );
     if let Some(pt) = resp.interact_pointer_pos() {
-        t.volume_db = -60.0 + ((pt.x - sl.left()) / sl.width()).clamp(0.0, 1.0) * 66.0;
+        let f = (pt.x - travel.0) / (travel.1 - travel.0);
+        t.volume_db = slider_to_db(f.clamp(0.0, 1.0));
     }
     if resp.double_clicked() {
         t.volume_db = 0.0;
     }
-    let f = ((t.volume_db + 60.0) / 66.0).clamp(0.0, 1.0);
-    g.rect_filled(sl, 3.0, Color32::from_gray(0x1e));
-    let knob = pos2(sl.left() + sl.width() * f, sl.center().y);
-    g.circle_filled(knob, 7.0, Color32::from_gray(0xc6));
-    g.circle_stroke(knob, 7.0, Stroke::new(1.0, Color32::from_gray(0x7a)));
+    g.rect_filled(sl, SLIDER_H / 2.0, Color32::from_rgb(55, 54, 54));
+    // Level meter inside the pill, as in Logic: two thin bars (L over R) that follow the
+    // slider's own scale, green, yellow from -6 dB and red above 0 dB.
+    let silent = t.mute || silenced;
+    for (k, peak) in [peaks.0, peaks.1].into_iter().enumerate() {
+        let db = crate::mixer::lin_to_db(peak);
+        if db <= -60.0 {
+            continue;
+        }
+        let y = sl.center().y - 3.0 + k as f32 * 3.5;
+        let x0 = sl.left() + 3.0;
+        let x_at = |db: f32| x0 + (sl.right() - 3.0 - x0) * db_to_slider(db);
+        let mut from = -60.0f32;
+        for edge in [-6.0f32, 0.0, 6.0] {
+            let to = db.min(edge);
+            if to > from {
+                let r = Rect::from_min_max(pos2(x_at(from), y), pos2(x_at(to), y + 2.5));
+                let color = if silent {
+                    Color32::from_gray(0x70)
+                } else {
+                    crate::mixer::meter_colour(to - 0.01)
+                };
+                g.rect_filled(r, 1.0, color);
+            }
+            from = edge;
+        }
+    }
+    let knob = pos2(
+        travel.0 + (travel.1 - travel.0) * db_to_slider(t.volume_db),
+        sl.center().y,
+    );
+    g.circle_filled(knob, SLIDER_H / 2.0 - 1.0, Color32::from_rgb(136, 134, 135));
+    g.circle_stroke(
+        knob,
+        SLIDER_H / 2.0 - 1.0,
+        Stroke::new(1.0, Color32::from_rgb(98, 97, 97)),
+    );
 
     let kc = pos2(hdr.right() - 22.0, hdr.center().y);
     let kresp = ui.interact(
@@ -1550,7 +2003,8 @@ fn header(ui: &Ui, g: &Painter, p: &mut Project, i: usize, hdr: Rect) -> egui::R
 
 // ------------------------------------------------------------------ main view
 
-pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
+pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer::Meters) {
+    let rec_target = s.rec.target();
     let area = ui.available_rect_before_wrap();
     ui.allocate_rect(area, Sense::hover());
     let tb = Rect::from_min_size(area.min, vec2(area.width(), TOOLBAR_H));
@@ -1692,12 +2146,13 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         if y + row_h < lanes.top() || y > lanes.bottom() {
             continue;
         }
+        let base_h = row_h - take_rows_height(&p.tracks[ti]);
         for ri in 0..p.tracks[ti].regions.len() {
             let start_beat = (p.tracks[ti].regions[ri].start_bar as f64 - 1.0) * bpb;
             let len_beats = p.tracks[ti].regions[ri].len_bars as f64 * bpb;
             let full = Rect::from_min_max(
                 pos2(x_of(start_beat), y + 1.0),
-                pos2(x_of(start_beat + len_beats), y + row_h - 1.0),
+                pos2(x_of(start_beat + len_beats), y + base_h - 1.0),
             );
             let rr = full.intersect(lanes);
             if rr.width() <= 0.0 || rr.height() <= 0.0 {
@@ -1729,10 +2184,88 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
                 p.tracks[ti].kind == TrackKind::Audio,
                 p.tracks[ti].regions[ri].params.mute,
             );
+            let folder_open = p.tracks[ti].regions[ri].folder.as_ref().map(|f| f.open);
             context_menu(&resp, |ui| {
-                region_items(ui, is_audio, muted, ti, ri, &mut picked);
+                region_items(ui, is_audio, muted, folder_open, ti, ri, &mut picked);
             });
             let selected = v.selected == Some((ti, ri));
+            if folder_open.is_some() {
+                // The triangle opens and closes the folder; the rows of an opened one are
+                // swiped to pick which take plays where.
+                let tri = ui.interact(
+                    folder_toggle_rect(full).intersect(lanes),
+                    id(("take_toggle", ti, ri)),
+                    Sense::click(),
+                );
+                if tri.clicked() {
+                    picked = Some(CtxAction::ToggleTakeFolder(ti, ri));
+                    v.selected = Some((ti, ri));
+                }
+                if folder_open == Some(true) {
+                    let n = p.tracks[ti].regions[ri]
+                        .folder
+                        .as_ref()
+                        .map_or(0, |f| f.takes.len());
+                    for take in 0..n {
+                        let row = take_row_rect(full, n, take).intersect(lanes);
+                        if row.width() <= 0.0 || row.height() <= 0.0 {
+                            continue;
+                        }
+                        let resp = ui.interact(
+                            row,
+                            id(("take_row", ti, ri, take)),
+                            Sense::click_and_drag(),
+                        );
+                        let Some(region) = p.tracks[ti].regions.get_mut(ri) else {
+                            continue;
+                        };
+                        let Some(folder) = region.folder.as_mut() else {
+                            continue;
+                        };
+                        let grab = |pt: egui::Pos2| {
+                            snap_to((beat_of(pt.x) - start_beat).max(0.0), step) as f32
+                        };
+                        if resp.drag_started() {
+                            if let Some(pt) = resp.interact_pointer_pos() {
+                                v.swipe = Some((folder.comp.clone(), grab(pt)));
+                            }
+                        }
+                        if resp.dragged() {
+                            if let (Some((orig, anchor)), Some(pt)) =
+                                (v.swipe.as_ref(), resp.interact_pointer_pos())
+                            {
+                                folder.comp = orig.clone();
+                                folder.swipe(take, *anchor, grab(pt));
+                                folder.apply(&mut region.notes, &mut region.controls);
+                            }
+                        }
+                        if resp.drag_stopped() {
+                            v.swipe = None;
+                            moved = true;
+                        }
+                        if resp.clicked() {
+                            // A click picks the whole take.
+                            let len = folder.len;
+                            folder.swipe(take, 0.0, len);
+                            folder.apply(&mut region.notes, &mut region.controls);
+                            moved = true;
+                        }
+                    }
+                }
+                if let Some(folder) = p.tracks[ti].regions[ri].folder.as_ref() {
+                    draw_take_folder(
+                        &g,
+                        full,
+                        &p.tracks[ti],
+                        &p.tracks[ti].regions[ri],
+                        folder,
+                        beat_px,
+                        selected,
+                        silenced_by_solo(p, ti),
+                    );
+                    continue;
+                }
+            }
             let tr = &p.tracks[ti];
             draw_region(
                 &g,
@@ -1742,6 +2275,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
                 &tr.regions[ri],
                 beat_px,
                 selected,
+                rec_target == Some((ti, ri)),
                 silenced_by_solo(p, ti),
                 ti as u32 * 77 + ri as u32 * 13 + 3,
             );
@@ -1807,7 +2341,9 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             continue;
         }
         let hdr = Rect::from_min_size(pos2(headers.left(), y), vec2(HEADER_W, row_h));
-        let resp = header(ui, &gh, p, i, hdr);
+        let peaks = meters.tracks.get(i).copied().unwrap_or((0.0, 0.0));
+        let silenced = silenced_by_solo(p, i);
+        let resp = header(ui, &gh, p, i, hdr, peaks, silenced);
         let t = &p.tracks[i];
         let info = TrackInfo {
             i,
@@ -1845,7 +2381,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             .on_hover_cursor(egui::CursorIcon::ResizeVertical);
         if resp.dragged() {
             if let (Some(pt), Some(t)) = (resp.interact_pointer_pos(), p.tracks.get_mut(i)) {
-                let wanted = pt.y - (bottom - row_h);
+                let wanted = pt.y - (bottom - row_h) - take_rows_height(t);
                 t.height = (wanted / v.row_h).clamp(Track::MIN_HEIGHT, Track::MAX_HEIGHT);
             }
         }
@@ -1958,6 +2494,27 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         [ruler.left_bottom(), ruler.right_bottom()],
         Stroke::new(1.0, Color32::from_gray(0x24)),
     );
+    // The stretch of the ruler over the selected region turns gold, as in Logic.
+    let selection = v
+        .selected
+        .and_then(|(t, r)| p.tracks.get(t)?.regions.get(r))
+        .map(|r| {
+            let start = (r.start_bar as f64 - 1.0) * bpb;
+            (start, start + r.len_bars as f64 * bpb)
+        });
+    if let Some((start, end)) = selection {
+        let band = Rect::from_min_max(
+            pos2(x_of(start).max(ruler.left()), ruler.top()),
+            pos2(x_of(end).min(ruler.right()), ruler.bottom()),
+        );
+        if band.width() > 0.0 {
+            gr.rect_filled(band, 0.0, RULER_SELECTION);
+            gr.line_segment(
+                [band.left_bottom(), band.right_bottom()],
+                Stroke::new(1.0, RULER_SELECTION_EDGE),
+            );
+        }
+    }
     if p.cycle {
         let band = Rect::from_min_max(
             pos2(x_of(p.cycle_start), ruler.top() + 2.0),
@@ -1973,8 +2530,12 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         let x = x_of(b as f64 * bpb);
         let in_cycle =
             p.cycle && (b as f64 * bpb) >= p.cycle_start && (b as f64 * bpb) < p.cycle_end;
+        let beat = b as f64 * bpb;
+        let in_selection = selection.is_some_and(|(s0, s1)| beat >= s0 && beat < s1);
         let col = if in_cycle {
             Color32::from_gray(0x2a)
+        } else if in_selection {
+            Color32::WHITE
         } else {
             TEXT
         };
@@ -2060,10 +2621,11 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         }
     }
     if visible {
+        let (line_c, head_c, edge_c) = playhead_colors(p.recording);
         let gp = ui.painter_at(Rect::from_min_max(ruler.min, area.max));
         gp.line_segment(
             [pos2(px, ruler.top() + 6.0), pos2(px, area.bottom())],
-            Stroke::new(1.0, Color32::from_gray(0xd8)),
+            Stroke::new(1.0, line_c),
         );
         let head = vec![
             pos2(px - 6.0, ruler.top() + 2.0),
@@ -2074,8 +2636,8 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         ];
         gp.add(Shape::convex_polygon(
             head,
-            Color32::from_gray(0xc8),
-            Stroke::new(1.0, Color32::from_gray(0x60)),
+            head_c,
+            Stroke::new(1.0, edge_c),
         ));
     }
 }
@@ -2083,6 +2645,16 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
 #[cfg(test)]
 mod row_tests {
     use super::*;
+
+    #[test]
+    fn volume_slider_round_trips_and_puts_unity_two_thirds_up() {
+        assert_eq!(db_to_slider(0.0), SLIDER_UNITY);
+        assert_eq!(db_to_slider(-60.0), 0.0);
+        assert_eq!(db_to_slider(6.0), 1.0);
+        for db in [-60.0, -30.0, -12.5, -0.1, 0.0, 2.0, 6.0] {
+            assert!((slider_to_db(db_to_slider(db)) - db).abs() < 1e-3, "{db}");
+        }
+    }
 
     #[test]
     fn the_toolbar_drops_its_least_used_items_first_when_narrow() {

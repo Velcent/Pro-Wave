@@ -29,6 +29,10 @@ const STRIP_SEL: Color32 = Color32::from_rgb(0x4d, 0x4d, 0x4d);
 const SLOT_EMPTY: Color32 = Color32::from_rgb(0x2c, 0x2c, 0x2c);
 const SLOT_GRAY: Color32 = Color32::from_rgb(0x55, 0x55, 0x55);
 const PLUGIN_BLUE: Color32 = Color32::from_rgb(0x36, 0x6f, 0xd2);
+/// A strip that makes no sound (muted, or another track is soloed): instruments, plug-ins
+/// and sends turn grey, and so do the meters.
+const PLUGIN_OFF: Color32 = Color32::from_rgb(0x4a, 0x4a, 0x4a);
+const METER_OFF: Color32 = Color32::from_rgb(0x70, 0x70, 0x70);
 const READ_GREEN: Color32 = Color32::from_rgb(0x6c, 0xd0, 0x5a);
 const MUTE_ON: Color32 = Color32::from_rgb(0x3b, 0x8c, 0xe6);
 const SOLO_ON: Color32 = Color32::from_rgb(0xe6, 0xc2, 0x2e);
@@ -120,7 +124,7 @@ fn frac_to_db(f: f32) -> f32 {
     SCALE[i] + (SCALE[i + 1] - SCALE[i]) * (idx - i as f32)
 }
 
-fn lin_to_db(x: f32) -> f32 {
+pub(crate) fn lin_to_db(x: f32) -> f32 {
     if x <= 1e-6 {
         -120.0
     } else {
@@ -238,7 +242,7 @@ fn pan_knob(ui: &Ui, g: &Painter, c: egui::Pos2, id: egui::Id, pan: Option<&mut 
 }
 
 /// Logic-style meter colour for a level in dB: green, yellow from -6 dB, red above 0 dB.
-fn meter_colour(db: f32) -> Color32 {
+pub(crate) fn meter_colour(db: f32) -> Color32 {
     if db > 0.0 {
         Color32::from_rgb(0xe8, 0x3a, 0x2c)
     } else if db > -6.0 {
@@ -251,6 +255,7 @@ fn meter_colour(db: f32) -> Color32 {
 /// Fader (scale + slot + cap) and stereo meter with peak-hold lines, laid out like Logic's
 /// channel strip: fader scale on the left, the cap, the meter scale numbers, then L/R bars.
 /// Returns the new fader value in dB when it was dragged or double-clicked.
+#[allow(clippy::too_many_arguments)]
 fn fader_and_meter(
     ui: &Ui,
     g: &Painter,
@@ -259,6 +264,7 @@ fn fader_and_meter(
     db: f32,
     editable: bool,
     peaks: (f32, f32),
+    inactive: bool,
 ) -> Option<f32> {
     let top = area.top() + 8.0;
     let bottom = area.bottom() - 6.0;
@@ -347,7 +353,11 @@ fn fader_and_meter(
                 if fb > fa {
                     let seg =
                         Rect::from_min_max(pos2(bar.left(), y_of(fb)), pos2(bar.right(), y_of(fa)));
-                    let col = meter_colour((lo + hi) * 0.5);
+                    let col = if inactive {
+                        METER_OFF
+                    } else {
+                        meter_colour((lo + hi) * 0.5)
+                    };
                     g.rect_filled(seg, 0.0, col);
                     // Lit left edge, like the LED column in Logic.
                     g.rect_filled(
@@ -371,7 +381,15 @@ fn fader_and_meter(
             let y = y_of(db_to_frac(hd));
             g.line_segment(
                 [pos2(bar.left(), y), pos2(bar.right(), y)],
-                Stroke::new(1.5, meter_colour(hd).lerp_to_gamma(Color32::WHITE, 0.4)),
+                Stroke::new(
+                    1.5,
+                    if inactive {
+                        METER_OFF
+                    } else {
+                        meter_colour(hd)
+                    }
+                    .lerp_to_gamma(Color32::WHITE, 0.4),
+                ),
             );
         }
     }
@@ -533,7 +551,14 @@ pub fn fx_rows_for(p: &Project, keys: &[StripKey]) -> usize {
 
 /// Logic's send slot: a blue "Bus N" button with a round level knob beside it. Click the slot
 /// to pick a bus; the eye marks a pre-fader send. Nothing is routed in the engine yet.
-fn send_slot(ui: &Ui, g: &Painter, r: Rect, send: &mut crate::model::SendSlot, uid: egui::Id) {
+fn send_slot(
+    ui: &Ui,
+    g: &Painter,
+    r: Rect,
+    send: &mut crate::model::SendSlot,
+    uid: egui::Id,
+    inactive: bool,
+) {
     let Some(bus) = send.bus else {
         let resp = ui.interact(r, uid, Sense::click());
         slot(g, r, "", SLOT_EMPTY, TEXT);
@@ -555,8 +580,8 @@ fn send_slot(ui: &Ui, g: &Painter, r: Rect, send: &mut crate::model::SendSlot, u
         g,
         slot_r,
         &trf("Bus {}", &[&bus]),
-        PLUGIN_BLUE,
-        Color32::WHITE,
+        if inactive { PLUGIN_OFF } else { PLUGIN_BLUE },
+        if inactive { TEXT_DIM } else { Color32::WHITE },
     );
     if send.pre {
         // The eye icon Logic shows on pre-fader sends.
@@ -634,6 +659,13 @@ pub fn channel_strip(
     name_style: NameStyle,
 ) {
     let selected = matches!(key, StripKey::Track(i) if i == p.selected_track);
+    let inactive = matches!(key, StripKey::Track(i)
+        if p.tracks[i].mute || crate::tracks_area::silenced_by_solo(p, i));
+    let (plug, plug_text) = if inactive {
+        (PLUGIN_OFF, TEXT_DIM)
+    } else {
+        (PLUGIN_BLUE, Color32::WHITE)
+    };
     // Whole-strip click selects (registered first so the controls on top win).
     if let StripKey::Track(i) = key {
         if ui
@@ -680,7 +712,7 @@ pub fn channel_strip(
     let input_r = row(r.input, 16.0);
     match (kind, instrument) {
         (Some(TrackKind::Instrument | TrackKind::Drummer), Some(inst)) => {
-            slot(g, input_r, inst, PLUGIN_BLUE, Color32::WHITE)
+            slot(g, input_r, inst, plug, plug_text)
         }
         // An aux strip's input is the bus it listens to: Aux 1 takes Bus 1, and so on. (The
         // engine does not route buses yet, so this is the strip's setting, not a signal path.)
@@ -692,13 +724,7 @@ pub fn channel_strip(
                     .count(),
                 _ => 1,
             };
-            slot(
-                g,
-                input_r,
-                &trf("Bus {}", &[&n]),
-                PLUGIN_BLUE,
-                Color32::WHITE,
-            );
+            slot(g, input_r, &trf("Bus {}", &[&n]), plug, plug_text);
         }
         (Some(TrackKind::Audio), _) => {
             slot(g, input_r, &trf("Input {}", &[&1]), SLOT_GRAY, TEXT);
@@ -713,7 +739,7 @@ pub fn channel_strip(
     for k in 0..r.fx_rows {
         let rr = row(r.fx + k as f32 * 17.0, 15.0);
         match inserts.get(k) {
-            Some(fx) => slot(g, rr, fx, PLUGIN_BLUE, Color32::WHITE),
+            Some(fx) => slot(g, rr, fx, plug, plug_text),
             None if k == inserts.len() => slot(g, rr, "", SLOT_EMPTY, TEXT),
             None => {}
         }
@@ -725,6 +751,7 @@ pub fn channel_strip(
             row(r.sends, 16.0),
             &mut p.tracks[i].send,
             id(ns, (key, "send")),
+            inactive,
         ),
         StripKey::StereoOut => slot(g, row(r.sends, 16.0), "", SLOT_EMPTY, TEXT),
         StripKey::Master => {}
@@ -830,6 +857,7 @@ pub fn channel_strip(
         vol_db,
         key != StripKey::Master,
         peaks,
+        inactive,
     ) {
         match key {
             StripKey::Track(i) => p.tracks[i].volume_db = db,

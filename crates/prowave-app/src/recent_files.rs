@@ -28,20 +28,25 @@ pub(crate) fn config_dir() -> Option<PathBuf> {
     Some(base.join("prowave"))
 }
 
-/// True the very first time Pro Wave starts on this computer (it then opens the demo song);
-/// false on every later start, which begins with a clean project. Remembered by an empty
-/// `first-launch-done` file in the config folder. Without a config folder every start is a
-/// later one, so the demo never comes back by surprise.
+/// True the first time this version of Pro Wave starts on this computer (it then opens the
+/// demo song); false on every later start, which begins with a clean project. Remembered by
+/// the version number in the `first-launch-done` file in the config folder, so each new
+/// version shows the demo once. A `demo-always` file in the same folder (made by hand, only
+/// on a developer's machine) shows it on every start. Without a config folder every start is
+/// a later one, so the demo never comes back by surprise.
 pub fn take_first_launch() -> bool {
-    config_dir().is_some_and(|dir| take_first_launch_in(&dir))
+    config_dir().is_some_and(|dir| take_first_launch_in(&dir, env!("CARGO_PKG_VERSION")))
 }
 
-fn take_first_launch_in(dir: &Path) -> bool {
+fn take_first_launch_in(dir: &Path, version: &str) -> bool {
+    if dir.join("demo-always").exists() {
+        return true;
+    }
     let marker = dir.join("first-launch-done");
-    if marker.exists() {
+    if std::fs::read_to_string(&marker).is_ok_and(|seen| seen.trim() == version) {
         return false;
     }
-    if let Err(e) = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&marker, b"")) {
+    if let Err(e) = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&marker, version)) {
         tracing::warn!(
             "cannot remember the first launch in {}: {e}",
             marker.display()
@@ -185,11 +190,21 @@ mod tests {
     }
 
     #[test]
-    fn only_the_first_launch_is_the_first() {
+    fn the_demo_shows_once_per_version_or_always_with_the_marker_file() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("prowave");
-        assert!(take_first_launch_in(&config), "nothing remembered yet");
-        assert!(!take_first_launch_in(&config));
-        assert!(!take_first_launch_in(&config));
+        assert!(
+            take_first_launch_in(&config, "0.1.7"),
+            "nothing remembered yet"
+        );
+        assert!(!take_first_launch_in(&config, "0.1.7"));
+        assert!(
+            take_first_launch_in(&config, "0.1.8"),
+            "a new version shows it again"
+        );
+        assert!(!take_first_launch_in(&config, "0.1.8"));
+        std::fs::write(config.join("demo-always"), b"").unwrap();
+        assert!(take_first_launch_in(&config, "0.1.8"));
+        assert!(take_first_launch_in(&config, "0.1.8"));
     }
 }
