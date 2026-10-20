@@ -51,6 +51,34 @@ pub struct NoteDoc {
     pub vel: u8,
 }
 
+/// One take of a take folder.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct TakeDoc {
+    pub notes: Vec<NoteDoc>,
+    pub controls: Vec<ControlDoc>,
+}
+
+/// A stretch of a take folder that plays one take.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct CompDoc {
+    /// Beats from the region start.
+    pub start: f32,
+    pub end: f32,
+    pub take: u32,
+}
+
+/// A MIDI controller event (the sustain pedal is controller 64).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct ControlDoc {
+    /// Beats from the region start.
+    pub start: f32,
+    pub num: u8,
+    pub val: u8,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(default)]
 pub struct RegionDoc {
@@ -58,6 +86,12 @@ pub struct RegionDoc {
     pub start_bar: f32,
     pub len_bars: f32,
     pub notes: Vec<NoteDoc>,
+    /// Controller events recorded with the notes (older files have none).
+    pub controls: Vec<ControlDoc>,
+    /// A take folder's takes and comp (empty for ordinary regions). `notes` and `controls`
+    /// then hold what the comp plays.
+    pub takes: Vec<TakeDoc>,
+    pub comp: Vec<CompDoc>,
     /// Path inside the archive (`media/…`) for audio regions.
     pub audio: Option<String>,
     pub mute: bool,
