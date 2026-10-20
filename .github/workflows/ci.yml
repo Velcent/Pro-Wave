@@ -61,6 +61,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo xtask bench
+        # The runners have no GPU, so startup and memory measure a software renderer: they are
+        # reported (as annotations on the run's page) but only the DSP load and binary size fail
+        # the job. On a real computer `cargo xtask bench` enforces all five.
+        env:
+          PROWAVE_BENCH_WINDOW_ADVISORY: "1"
         run: cargo xtask bench
       - name: Layout pictures
         if: always()

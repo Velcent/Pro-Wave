@@ -65,8 +65,10 @@ fn value(report: &str, key: &str) -> Option<f64> {
 
 /// Checks `report` (with `binary_mb` added) against the targets. Returns the lines to print
 /// and whether everything measured is within its limit. A missing window-only value is a
-/// skip (no display on this machine); any other missing value is a failure.
-fn evaluate(report: &str) -> (Vec<String>, bool) {
+/// skip (no display on this machine); any other missing value is a failure. With
+/// `window_advisory`, window numbers over their limit are reported but do not fail: build
+/// servers have no GPU, so startup and memory there measure a software renderer.
+fn evaluate(report: &str, window_advisory: bool) -> (Vec<String>, bool) {
     let window_error = report.lines().find_map(|l| l.strip_prefix("window_error="));
     let mut lines = Vec::new();
     let mut ok = true;
@@ -74,6 +76,10 @@ fn evaluate(report: &str) -> (Vec<String>, bool) {
         match value(report, t.key) {
             Some(v) if v <= t.max => lines.push(format!(
                 "  ok    {:<28} {v:>9.3} {} (limit {})",
+                t.what, t.unit, t.max
+            )),
+            Some(v) if t.needs_window && window_advisory => lines.push(format!(
+                "  note  {:<28} {v:>9.3} {} (limit {}; not enforced without a GPU)",
                 t.what, t.unit, t.max
             )),
             Some(v) => {
@@ -164,7 +170,20 @@ pub fn bench(root: &Path) -> bool {
     };
     let _ = std::fs::remove_file(&out);
     let report = format!("{report}binary_mb={binary_mb:.2}\n");
-    let (lines, ok) = evaluate(&report);
+    let advisory = std::env::var_os("PROWAVE_BENCH_WINDOW_ADVISORY").is_some();
+    let (lines, ok) = evaluate(&report, advisory);
+    // On GitHub Actions, also as annotations: they show on the run's page without signing in.
+    if std::env::var_os("GITHUB_ACTIONS").is_some() {
+        for l in &lines {
+            let failed = l.contains("OVER") || l.contains("MISSING") || l.contains("SILENT");
+            let level = if failed { "error" } else { "notice" };
+            println!(
+                "::{level} title=bench {}::{}",
+                std::env::consts::OS,
+                l.trim()
+            );
+        }
+    }
     println!(
         "\nPro Wave lightweight targets ({} {}):",
         std::env::consts::OS,
@@ -190,7 +209,7 @@ mod tests {
 
     #[test]
     fn a_report_within_every_limit_passes() {
-        let (lines, ok) = evaluate(GOOD);
+        let (lines, ok) = evaluate(GOOD, false);
         assert!(ok, "{lines:?}");
         assert_eq!(lines.len(), TARGETS.len());
     }
@@ -198,28 +217,33 @@ mod tests {
     #[test]
     fn a_value_over_its_limit_fails() {
         let slow = GOOD.replace("startup_ms=210.5", "startup_ms=812");
-        let (lines, ok) = evaluate(&slow);
+        let (lines, ok) = evaluate(&slow, false);
         assert!(!ok);
         assert!(lines
             .iter()
             .any(|l| l.contains("OVER") && l.contains("first frame")));
+        // Without a GPU (build servers) the window numbers are only reported...
+        assert!(evaluate(&slow, true).1);
+        // ...but the DSP numbers still count.
+        let heavy = GOOD.replace("dsp24_load=0.031", "dsp24_load=0.4");
+        assert!(!evaluate(&heavy, true).1);
     }
 
     #[test]
     fn without_a_window_only_the_window_numbers_are_skipped() {
         let headless = "window_error=no display\ndsp24_load=0.03\ndsp24_peak=0.7\n\
                         dsp24_rss_mb=40\nbinary_mb=14\n";
-        let (lines, ok) = evaluate(headless);
+        let (lines, ok) = evaluate(headless, false);
         assert!(ok, "{lines:?}");
         assert_eq!(lines.iter().filter(|l| l.contains("skip")).count(), 2);
 
-        let (_, ok) = evaluate("window_error=x\ndsp24_peak=0.7\nbinary_mb=14\n");
+        let (_, ok) = evaluate("window_error=x\ndsp24_peak=0.7\nbinary_mb=14\n", false);
         assert!(!ok, "the DSP numbers are always required");
     }
 
     #[test]
     fn a_silent_render_fails() {
-        let (_, ok) = evaluate(&GOOD.replace("dsp24_peak=0.8", "dsp24_peak=0.000"));
+        let (_, ok) = evaluate(&GOOD.replace("dsp24_peak=0.8", "dsp24_peak=0.000"), false);
         assert!(!ok);
     }
 }
