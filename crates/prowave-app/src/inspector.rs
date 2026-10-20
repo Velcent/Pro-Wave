@@ -1,18 +1,21 @@
 //! Inspector (Logic Pro: the "i" panel): Region Inspector, Track Inspector and the two
 //! channel strips (selected track and its output).
 //!
-//! Works today: Region Mute, Quantize, Transpose, Velocity; Track Transpose, Velocity,
+//! Works today: Region Mute, Quantize, Transpose, Velocity, and for audio regions Gain, Fade
+//! In / Out, Curve and Reverse; Track Transpose, Velocity,
 //! Key Limit and Vel Limit (all applied non-destructively when the engine song is built);
 //! both channel strips (fader, pan, M/S, meters). Fields Logic has that are not implemented
 //! yet are shown dimmed and do nothing.
+use crate::i18n::tr;
 use crate::mixer::{channel_strip, fx_rows_for, rows, Meters, NameStyle, StripKey};
-use crate::model::{Project, TrackKind};
+use crate::model::{Project, TrackKind, MAX_REGION_GAIN, MIN_REGION_GAIN};
 use crate::track_icons::{draw_icon, track_icon};
 use crate::widgets::{stroke, BTN_BG, TEXT, TEXT_DIM};
 use crate::UiState;
 use egui::{
     pos2, vec2, Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui,
 };
+use prowave_engine::FadeCurve;
 
 const PANEL_BG: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
 const HEADER_BG: Color32 = Color32::from_rgb(0x42, 0x42, 0x42);
@@ -22,7 +25,33 @@ const LABEL_RIGHT: f32 = 104.0;
 const VALUE_LEFT: f32 = 112.0;
 const STRIPS_MIN_H: f32 = 430.0;
 
-const QUANTIZE: [(&str, Option<f32>); 7] = [
+/// Fade lengths move in 1/16 notes.
+const FADE_STEPS_PER_BEAT: i32 = 4;
+
+pub(crate) const FADE_CURVES: [(&str, FadeCurve); 3] = [
+    ("Equal Power", FadeCurve::EqualPower),
+    ("Linear", FadeCurve::Linear),
+    ("S-Curve", FadeCurve::SCurve),
+];
+
+fn gain_text(db: f32) -> String {
+    if db == 0.0 {
+        "0 dB".into()
+    } else {
+        format!("{db:+.1} dB")
+    }
+}
+
+/// A fade of `beats` at `bpm`, in milliseconds like Logic shows it.
+fn fade_text(beats: f32, bpm: f32) -> String {
+    if beats <= 0.0 {
+        "0".into()
+    } else {
+        format!("{:.0} ms", beats * 60_000.0 / bpm.max(1.0))
+    }
+}
+
+pub(crate) const QUANTIZE: [(&str, Option<f32>); 7] = [
     ("Off", None),
     ("1/4 Note", Some(1.0)),
     ("1/8 Note", Some(0.5)),
@@ -294,7 +323,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
         .tracks
         .selected
         .filter(|(t, r)| p.tracks.get(*t).is_some_and(|tr| *r < tr.regions.len()));
-    let region_name = sel.map_or("MIDI Defaults".to_string(), |(t, r)| {
+    let region_name = sel.map_or(tr("MIDI Defaults").to_string(), |(t, r)| {
         p.tracks[t].regions[r].name.clone()
     });
     let hdr = Rect::from_min_size(pos2(left, y), vec2(w, HEADER_H));
@@ -304,7 +333,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
         hdr,
         "region",
         s.inspector.region_open,
-        "Region:",
+        tr("Region:"),
         &region_name,
     ) {
         s.inspector.region_open = !s.inspector.region_open;
@@ -322,19 +351,19 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
         let vx = left + VALUE_LEFT;
         let vw = w - VALUE_LEFT - 10.0;
 
-        label(&g, left, y, "Mute:", has);
+        label(&g, left, y, tr("Mute:"), has);
         if checkbox(ui, &g, pos2(vx, y), "region_mute", params.mute, has) {
             params.mute = !params.mute;
         }
         y += ROW_H;
-        label(&g, left, y, "Loop:", false);
+        label(&g, left, y, tr("Loop:"), false);
         checkbox(ui, &g, pos2(vx, y), "region_loop", false, false);
         y += ROW_H;
-        label(&g, left, y, "Quantize:", midi);
+        label(&g, left, y, tr("Quantize:"), midi);
         let q_text = QUANTIZE
             .iter()
             .find(|(_, q)| *q == params.quantize)
-            .map_or("Off", |(t, _)| t);
+            .map_or(tr("Off"), |(t, _)| tr(t));
         if let Some(resp) = popup(
             ui,
             &g,
@@ -345,7 +374,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
         ) {
             egui::Popup::menu(&resp).show(|ui| {
                 for (t, q) in QUANTIZE {
-                    if ui.selectable_label(params.quantize == q, t).clicked() {
+                    if ui.selectable_label(params.quantize == q, tr(t)).clicked() {
                         params.quantize = q;
                         ui.close();
                     }
@@ -353,9 +382,9 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
             });
         }
         y += ROW_H;
-        label(&g, left, y, "Q-Swing:", false);
+        label(&g, left, y, tr("Q-Swing:"), false);
         y += ROW_H;
-        label(&g, left, y, "Transpose:", midi);
+        label(&g, left, y, tr("Transpose:"), midi);
         let r = Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0));
         if let Some(v) = drag_value(
             ui,
@@ -371,7 +400,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
             params.transpose = v as i8;
         }
         y += ROW_H;
-        label(&g, left, y, "Velocity:", midi);
+        label(&g, left, y, tr("Velocity:"), midi);
         let r = Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0));
         if let Some(v) = drag_value(
             ui,
@@ -385,6 +414,98 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
             midi,
         ) {
             params.velocity = v as i8;
+        }
+        y += ROW_H;
+
+        // Audio regions: gain, fades and reverse (applied by the engine, file unchanged).
+        let audio = has && is_audio;
+        let (start_beat, len_beats) = sel.map_or((0.0, 0.0), |(t, r)| {
+            let reg = &p.tracks[t].regions[r];
+            let bpb = p.beats_per_bar();
+            (
+                (reg.start_bar as f64 - 1.0) * bpb,
+                reg.len_bars as f64 * bpb,
+            )
+        });
+        let bpm = p.tempo_at(start_beat);
+        label(&g, left, y, tr("Gain:"), audio);
+        let r = Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0));
+        if let Some(v) = drag_value(
+            ui,
+            &g,
+            r,
+            "region_gain",
+            (params.gain_db * 2.0).round() as i32,
+            (
+                (MIN_REGION_GAIN * 2.0) as i32,
+                (MAX_REGION_GAIN * 2.0) as i32,
+            ),
+            0,
+            gain_text(params.gain_db),
+            audio,
+        ) {
+            params.gain_db = v as f32 / 2.0;
+        }
+        y += ROW_H;
+        // Fades move in 1/16-note steps and show in milliseconds, as in Logic.
+        let max_fade = (len_beats * FADE_STEPS_PER_BEAT as f64) as i32;
+        for (name, key, which) in [
+            (tr("Fade In:"), "region_fade_in", 0),
+            (tr("Fade Out:"), "region_fade_out", 1),
+        ] {
+            let beats = if which == 0 {
+                params.fade_in
+            } else {
+                params.fade_out
+            };
+            label(&g, left, y, name, audio);
+            let r = Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0));
+            if let Some(v) = drag_value(
+                ui,
+                &g,
+                r,
+                key,
+                (beats * FADE_STEPS_PER_BEAT as f32).round() as i32,
+                (0, max_fade.max(0)),
+                0,
+                fade_text(beats, bpm),
+                audio,
+            ) {
+                let beats = v as f32 / FADE_STEPS_PER_BEAT as f32;
+                if which == 0 {
+                    params.fade_in = beats;
+                } else {
+                    params.fade_out = beats;
+                }
+            }
+            y += ROW_H;
+        }
+        label(&g, left, y, tr("Curve:"), audio);
+        let curve_name = FADE_CURVES
+            .iter()
+            .find(|(_, c)| *c == params.fade_curve)
+            .map_or(tr("Equal Power"), |(t, _)| tr(t));
+        if let Some(resp) = popup(
+            ui,
+            &g,
+            Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0)),
+            "fade_curve",
+            curve_name,
+            audio,
+        ) {
+            egui::Popup::menu(&resp).show(|ui| {
+                for (t, c) in FADE_CURVES {
+                    if ui.selectable_label(params.fade_curve == c, tr(t)).clicked() {
+                        params.fade_curve = c;
+                        ui.close();
+                    }
+                }
+            });
+        }
+        y += ROW_H;
+        label(&g, left, y, tr("Reverse:"), audio);
+        if checkbox(ui, &g, pos2(vx, y), "region_reverse", params.reverse, audio) {
+            params.reverse = !params.reverse;
         }
         y += ROW_H;
 
@@ -411,22 +532,22 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
         g.text(
             pos2(left + 22.0, more.center().y),
             Align2::LEFT_CENTER,
-            "More",
+            tr("More"),
             FontId::proportional(11.5),
             TEXT_DIM,
         );
         y += ROW_H;
         if s.inspector.more_open {
             for t in [
-                "Dynamics:",
-                "Gate Time:",
-                "Clip Length:",
-                "Score:",
-                "Q-Velocity:",
-                "Q-Length:",
-                "Q-Flam:",
-                "Q-Range:",
-                "Q-Strength:",
+                tr("Dynamics:"),
+                tr("Gate Time:"),
+                tr("Clip Length:"),
+                tr("Score:"),
+                tr("Q-Velocity:"),
+                tr("Q-Length:"),
+                tr("Q-Flam:"),
+                tr("Q-Range:"),
+                tr("Q-Strength:"),
             ] {
                 label(&g, left, y, t, false);
                 y += ROW_H;
@@ -451,7 +572,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
         hdr,
         "track",
         s.inspector.track_open,
-        "Track:",
+        tr("Track:"),
         &track_name,
     ) {
         s.inspector.track_open = !s.inspector.track_open;
@@ -463,7 +584,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
         let audio = p.tracks[ti].kind == TrackKind::Audio;
         let mut tp = p.tracks[ti].params;
 
-        label(&g, left, y, "Icon:", true);
+        label(&g, left, y, tr("Icon:"), true);
         draw_icon(
             &g,
             Rect::from_min_size(pos2(vx, y + 1.0), vec2(26.0, 26.0)),
@@ -471,7 +592,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
         );
         y += 30.0;
         let channel = p.channel_name(ti);
-        label(&g, left, y, "Channel:", false);
+        label(&g, left, y, tr("Channel:"), false);
         popup(
             ui,
             &g,
@@ -482,35 +603,35 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
         );
         y += ROW_H;
         if audio {
-            label(&g, left, y, "Freeze Mode:", false);
+            label(&g, left, y, tr("Freeze Mode:"), false);
             popup(
                 ui,
                 &g,
                 Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0)),
                 "freeze",
-                "Pre Fader",
+                tr("Pre Fader"),
                 false,
             );
             y += ROW_H;
-            label(&g, left, y, "Q-Reference:", false);
+            label(&g, left, y, tr("Q-Reference:"), false);
             checkbox(ui, &g, pos2(vx, y), "qref", true, false);
             y += ROW_H;
-            label(&g, left, y, "Flex Mode:", false);
+            label(&g, left, y, tr("Flex Mode:"), false);
             popup(
                 ui,
                 &g,
                 Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0)),
                 "flex",
-                "Off",
+                tr("Off"),
                 false,
             );
             y += ROW_H;
         } else {
             for (t, v) in [
-                ("MIDI In Port:", "All"),
-                ("MIDI In Channel:", "All"),
-                ("MIDI Out Channel:", "All"),
-                ("Freeze Mode:", "Pre Fader"),
+                (tr("MIDI In Port:"), tr("All")),
+                (tr("MIDI In Channel:"), tr("All")),
+                (tr("MIDI Out Channel:"), tr("All")),
+                (tr("Freeze Mode:"), tr("Pre Fader")),
             ] {
                 label(&g, left, y, t, false);
                 popup(
@@ -523,7 +644,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
                 );
                 y += ROW_H;
             }
-            label(&g, left, y, "Transpose:", true);
+            label(&g, left, y, tr("Transpose:"), true);
             let r = Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0));
             if let Some(v) = drag_value(
                 ui,
@@ -539,7 +660,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
                 tp.transpose = v as i8;
             }
             y += ROW_H;
-            label(&g, left, y, "Velocity:", true);
+            label(&g, left, y, tr("Velocity:"), true);
             let r = Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0));
             if let Some(v) = drag_value(
                 ui,
@@ -556,7 +677,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
             }
             y += ROW_H;
             let half = (vw - 4.0) / 2.0;
-            label(&g, left, y, "Key Limit:", true);
+            label(&g, left, y, tr("Key Limit:"), true);
             let (lo, hi) = tp.key_limit;
             let r1 = Rect::from_min_size(pos2(vx, y + 2.0), vec2(half, ROW_H - 4.0));
             let r2 = Rect::from_min_size(pos2(vx + half + 4.0, y + 2.0), vec2(half, ROW_H - 4.0));
@@ -587,7 +708,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
                 tp.key_limit.1 = v as u8;
             }
             y += ROW_H;
-            label(&g, left, y, "Vel Limit:", true);
+            label(&g, left, y, tr("Vel Limit:"), true);
             let (lo, hi) = tp.vel_limit;
             let r1 = Rect::from_min_size(pos2(vx, y + 2.0), vec2(half, ROW_H - 4.0));
             let r2 = Rect::from_min_size(pos2(vx + half + 4.0, y + 2.0), vec2(half, ROW_H - 4.0));
@@ -618,24 +739,24 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
                 tp.vel_limit.1 = v as u8;
             }
             y += ROW_H;
-            label(&g, left, y, "Delay:", false);
+            label(&g, left, y, tr("Delay:"), false);
             y += ROW_H;
-            for t in ["No Transpose:", "No Reset:"] {
+            for t in [tr("No Transpose:"), tr("No Reset:")] {
                 label(&g, left, y, t, false);
                 checkbox(ui, &g, pos2(vx, y), t, false, false);
                 y += ROW_H;
             }
-            label(&g, left, y, "Staff Style:", false);
+            label(&g, left, y, tr("Staff Style:"), false);
             popup(
                 ui,
                 &g,
                 Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0)),
                 "staff",
-                "Auto",
+                tr("Auto"),
                 false,
             );
             y += ROW_H;
-            label(&g, left, y, "Articulation Set:", false);
+            label(&g, left, y, tr("Articulation Set:"), false);
             popup(
                 ui,
                 &g,
@@ -689,5 +810,19 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
     if s.inspector.pending_song_change && !ui.input(|i| i.pointer.any_down()) {
         s.inspector.pending_song_change = false;
         p.song_rev += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn region_gain_and_fades_read_like_logic() {
+        assert_eq!(gain_text(0.0), "0 dB");
+        assert_eq!(gain_text(-3.5), "-3.5 dB");
+        assert_eq!(gain_text(2.0), "+2.0 dB");
+        assert_eq!(fade_text(0.0, 120.0), "0");
+        assert_eq!(fade_text(1.0, 120.0), "500 ms", "a beat at 120 bpm");
     }
 }

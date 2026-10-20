@@ -1,4 +1,5 @@
 //! Small Logic-style widgets shared by the local toolbars (Tracks area, Mixer).
+use crate::i18n::tr;
 use egui::{
     pos2, vec2, Align2, Color32, FontId, Id, Painter, Pos2, Rect, Response, Sense, Shape, Stroke,
     Ui,
@@ -49,6 +50,7 @@ pub fn menu_title(
     label: &str,
     id: Id,
 ) -> (Response, f32) {
+    let label = tr(label);
     let font = FontId::proportional(13.0);
     let w = g.layout_no_wrap(label.into(), font.clone(), TEXT).size().x + 22.0;
     let r = Rect::from_min_size(pos2(left, cy - 10.0), vec2(w, 20.0));
@@ -87,11 +89,14 @@ pub fn popup_button(ui: &Ui, g: &Painter, rect: Rect, id: Id, text: &str) -> Res
             BTN_BG
         },
     );
+    // Long values (some languages) end in "…" instead of running under the arrows.
+    let font = FontId::proportional(12.5);
+    let shown = crate::mixer::elide(g, text, &font, rect.width() - 26.0);
     g.text(
         pos2(rect.left() + 8.0, rect.center().y),
         Align2::LEFT_CENTER,
-        text,
-        FontId::proportional(12.5),
+        shown,
+        font,
         TEXT,
     );
     let c = pos2(rect.right() - 9.0, rect.center().y);
@@ -138,14 +143,20 @@ pub fn undo_items(
         key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z),
     );
     if ui
-        .add_enabled(can_undo, egui::Button::new("Undo").shortcut_text(undo_key))
+        .add_enabled(
+            can_undo,
+            egui::Button::new(tr("Undo")).shortcut_text(undo_key),
+        )
         .clicked()
     {
         *pick = Some(crate::undo::UndoCmd::Undo);
         ui.close();
     }
     if ui
-        .add_enabled(can_redo, egui::Button::new("Redo").shortcut_text(redo_key))
+        .add_enabled(
+            can_redo,
+            egui::Button::new(tr("Redo")).shortcut_text(redo_key),
+        )
         .clicked()
     {
         *pick = Some(crate::undo::UndoCmd::Redo);
@@ -154,7 +165,7 @@ pub fn undo_items(
 }
 
 pub fn todo_item(ui: &mut Ui, label: &str) {
-    ui.add_enabled(false, egui::Button::new(label));
+    ui.add_enabled(false, egui::Button::new(tr(label)));
 }
 
 /// Horizontal slider (thin groove, round knob). Returns the new 0..1 value when dragged.

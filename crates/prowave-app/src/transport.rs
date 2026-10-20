@@ -3,6 +3,7 @@
 //!
 //! Every icon is drawn with vector shapes here (no bitmap or font glyphs), so it renders the
 //! same on Windows, Linux and macOS.
+use crate::i18n::{tr, trf};
 use crate::{
     model::{Project, SigPart},
     Bottom, UiState,
@@ -504,21 +505,23 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, rect: Rect, cpu_load: f32) {
         egui::Id::unique(("control_bar", "tempo")),
         Sense::drag(),
     );
+    // With a Tempo track, this is the tempo at the playhead, and dragging changes that one.
+    let tempo_now = p.tempo_at(p.position_beats);
     if resp.dragged() {
-        p.tempo = (p.tempo - resp.drag_delta().y * 0.5).clamp(5.0, 990.0);
+        p.set_tempo_at(p.position_beats, tempo_now - resp.drag_delta().y * 0.5);
     }
     g.text(
         pos2(tempo_rect.center().x, top),
         Align2::CENTER_TOP,
-        format!("{:.4}", p.tempo),
+        format!("{:.4}", p.tempo_at(p.position_beats)),
         FontId::proportional(18.0),
         LCD_TEXT,
     );
     g.text(
         pos2(tempo_rect.center().x, bot + 2.0),
         Align2::CENTER_TOP,
-        "Keep Tempo",
-        FontId::proportional(13.5),
+        tr("Keep Tempo"),
+        fitting_font(g, tr("Keep Tempo"), 13.5, 82.0),
         LCD_TEXT,
     );
 
@@ -538,7 +541,7 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, rect: Rect, cpu_load: f32) {
                 Sense::drag(),
             )
             .on_hover_cursor(egui::CursorIcon::ResizeVertical)
-            .on_hover_text("Drag to change the time signature");
+            .on_hover_text(tr("Drag to change the time signature"));
         let mut leftover = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
         if resp.drag_started() {
             leftover = 0.0;
@@ -572,15 +575,15 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, rect: Rect, cpu_load: f32) {
     g.text(
         pos2(x0 + 386.0, top + 3.0),
         Align2::LEFT_TOP,
-        "No In",
-        FontId::proportional(13.5),
+        tr("No In"),
+        fitting_font(g, tr("No In"), 13.5, 84.0),
         LCD_TEXT,
     );
     g.text(
         pos2(x0 + 386.0, bot + 2.0),
         Align2::LEFT_TOP,
-        "No Out",
-        FontId::proportional(13.5),
+        tr("No Out"),
+        fitting_font(g, tr("No Out"), 13.5, 84.0),
         LCD_TEXT,
     );
 
@@ -611,7 +614,10 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, rect: Rect, cpu_load: f32) {
                 egui::Id::unique(("lcd", "cpu_meter")),
                 egui::Sense::hover(),
             )
-            .on_hover_text(format!("Audio DSP load: {:.0}%", cpu_load * 100.0));
+            .on_hover_text(trf(
+                "Audio DSP load: {}%",
+                &[&format!("{:.0}", cpu_load * 100.0)],
+            ));
         }
     }
 
@@ -913,6 +919,20 @@ fn volume_span(after: f32, right: f32) -> (f32, f32) {
     } else {
         (left, width)
     }
+}
+
+/// The largest font, up to `size`, that fits `text` into `max_w` points: an LCD column has a
+/// fixed width, and some languages need more room (German, Finnish).
+fn fitting_font(g: &Painter, text: &str, size: f32, max_w: f32) -> FontId {
+    let w = g
+        .layout_no_wrap(text.to_owned(), FontId::proportional(size), LCD_TEXT)
+        .size()
+        .x;
+    FontId::proportional(if w > max_w {
+        (size * max_w / w).max(8.0)
+    } else {
+        size
+    })
 }
 
 #[cfg(test)]

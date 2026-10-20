@@ -7,6 +7,7 @@
 //! with Strength and Swing, Scale Quantize, velocity editing, zoom and scrolling. Edits go to
 //! the project and reach the engine when the mouse is released. Score, Step Sequencer and
 //! Smart Tempo are not implemented yet and show dimmed.
+use crate::i18n::{tr, trf};
 use crate::model::{Note, Project, TrackKind};
 use crate::note_edit::{self, GRIDS, MODES, ROOTS};
 use crate::tracks_area::{snap_step, snap_to, Snap};
@@ -180,7 +181,12 @@ fn target_region(p: &Project, s: &UiState) -> Option<(usize, usize)> {
 
 fn tabs(g: &Painter, bar: Rect) {
     g.rect_filled(bar, 0.0, PANEL_BG);
-    let tabs = ["Piano Roll", "Score", "Step Sequencer", "Smart Tempo"];
+    let tabs = [
+        tr("Piano Roll"),
+        tr("Score"),
+        tr("Step Sequencer"),
+        tr("Smart Tempo"),
+    ];
     let font = FontId::proportional(12.5);
     let widths: Vec<f32> = tabs
         .iter()
@@ -244,14 +250,17 @@ fn toolbar(
     let mut x = bar.left() + 32.0;
     let uid = |k: &str| egui::Id::unique((NS, k.to_string()));
 
-    let (edit, w) = menu_title(ui, &g, x, cy, "Edit", uid("Edit"));
+    let (edit, w) = menu_title(ui, &g, x, cy, tr("Edit"), uid("Edit"));
     x += w + 2.0;
     egui::Popup::menu(&edit).show(|ui| {
         ui.set_min_width(230.0);
         crate::widgets::undo_items(ui, act.can_undo, act.can_redo, &mut act.undo);
         ui.separator();
         if ui
-            .add_enabled(has_sel, egui::Button::new("Delete").shortcut_text("Del"))
+            .add_enabled(
+                has_sel,
+                egui::Button::new(tr("Delete")).shortcut_text(tr("Del")),
+            )
             .clicked()
         {
             act.delete = true;
@@ -262,7 +271,7 @@ fn toolbar(
             Key::A,
         ));
         if ui
-            .add(egui::Button::new("Select All").shortcut_text(sc))
+            .add(egui::Button::new(tr("Select All")).shortcut_text(sc))
             .clicked()
         {
             act.select_all = true;
@@ -270,19 +279,22 @@ fn toolbar(
         }
         ui.separator();
         if ui
-            .add(egui::Button::new("Quantize").shortcut_text("Q"))
+            .add(egui::Button::new(tr("Quantize")).shortcut_text("Q"))
             .clicked()
         {
             act.quantize = true;
             ui.close();
         }
     });
-    let (func, w) = menu_title(ui, &g, x, cy, "Functions", uid("Functions"));
+    let (func, w) = menu_title(ui, &g, x, cy, tr("Functions"), uid("Functions"));
     x += w + 2.0;
     egui::Popup::menu(&func).show(|ui| {
         ui.set_min_width(230.0);
         if ui
-            .add_enabled(v.scale_root.is_some(), egui::Button::new("Scale Quantize"))
+            .add_enabled(
+                v.scale_root.is_some(),
+                egui::Button::new(tr("Scale Quantize")),
+            )
             .clicked()
         {
             act.scale = true;
@@ -290,33 +302,33 @@ fn toolbar(
         }
         ui.separator();
         for item in [
-            "Transpose…",
-            "Legato",
-            "Humanize…",
-            "Fixed Velocity…",
-            "Note Repeat…",
+            tr("Transpose…"),
+            tr("Legato"),
+            tr("Humanize…"),
+            tr("Fixed Velocity…"),
+            tr("Note Repeat…"),
         ] {
             todo_item(ui, item);
         }
     });
-    let (view, w) = menu_title(ui, &g, x, cy, "View", uid("View"));
+    let (view, w) = menu_title(ui, &g, x, cy, tr("View"), uid("View"));
     x += w + 14.0;
     egui::Popup::menu(&view).show(|ui| {
         ui.set_min_width(230.0);
-        if ui.button("Zoom In").clicked() {
+        if ui.button(tr("Zoom In")).clicked() {
             v.beat_px = (v.beat_px * 1.25).min(400.0);
             ui.close();
         }
-        if ui.button("Zoom Out").clicked() {
+        if ui.button(tr("Zoom Out")).clicked() {
             v.beat_px = (v.beat_px / 1.25).max(12.0);
             ui.close();
         }
         ui.separator();
-        if ui.button("Zoom to Fit").clicked() {
+        if ui.button(tr("Zoom to Fit")).clicked() {
             v.fit = true;
             ui.close();
         }
-        todo_item(ui, "Note Colors");
+        todo_item(ui, tr("Note Colors"));
     });
 
     // Tool buttons: Pointer / Pencil (shortcuts: Esc and P).
@@ -395,7 +407,7 @@ fn toolbar(
     g.text(
         pos2(snap_r.left() - 6.0, cy),
         Align2::RIGHT_CENTER,
-        "Snap:",
+        tr("Snap:"),
         FontId::proportional(12.5),
         TEXT_DIM,
     );
@@ -466,7 +478,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         g.text(
             body.center(),
             Align2::CENTER_CENTER,
-            "Select a MIDI region to edit its notes",
+            tr("Select a MIDI region to edit its notes"),
             FontId::proportional(13.0),
             TEXT_DIM,
         );
@@ -1015,9 +1027,9 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let mut y = insp.top() + 10.0;
     let n_sel = v.selected.len();
     let title = match n_sel {
-        0 => "No Notes selected".to_string(),
-        1 => "One Note selected".to_string(),
-        n => format!("{n} Notes selected"),
+        0 => tr("No Notes selected").to_string(),
+        1 => tr("One Note selected").to_string(),
+        n => trf("{} Notes selected", &[&n]),
     };
     gi.text(
         pos2(ix, y),
@@ -1028,23 +1040,23 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     );
     y += 17.0;
     let font = FontId::proportional(11.0);
-    let shown = crate::mixer::elide(&gi, &format!("in {region_name}"), &font, iw);
+    let shown = crate::mixer::elide(&gi, &trf("in {}", &[&region_name]), &font, iw);
     gi.text(pos2(ix, y), Align2::LEFT_TOP, shown, font, TEXT_DIM);
     y += 30.0;
 
     gi.text(
         pos2(ix, y),
         Align2::LEFT_TOP,
-        "Time Quantize (classic)",
+        tr("Time Quantize (classic)"),
         FontId::proportional(11.5),
         TEXT_DIM,
     );
     y += 18.0;
     let grid_r = Rect::from_min_size(pos2(ix, y), vec2(iw - 38.0, 20.0));
-    let gresp = popup_button(ui, &gi, grid_r, id("grid_popup"), GRIDS[v.grid].0);
+    let gresp = popup_button(ui, &gi, grid_r, id("grid_popup"), tr(GRIDS[v.grid].0));
     egui::Popup::menu(&gresp).show(|ui| {
         for (i, (label, _)) in GRIDS.iter().enumerate() {
-            if ui.selectable_label(v.grid == i, *label).clicked() {
+            if ui.selectable_label(v.grid == i, tr(label)).clicked() {
                 v.grid = i;
                 ui.close();
             }
@@ -1061,8 +1073,8 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     }
     y += 34.0;
     for (label, key, value) in [
-        ("Strength", "strength", &mut v.strength),
-        ("Swing", "swing", &mut v.swing),
+        (tr("Strength"), "strength", &mut v.strength),
+        (tr("Swing"), "swing", &mut v.swing),
     ] {
         gi.text(
             pos2(ix, y),
@@ -1097,16 +1109,19 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     gi.text(
         pos2(ix, y),
         Align2::LEFT_TOP,
-        "Scale Quantize",
+        tr("Scale Quantize"),
         FontId::proportional(11.5),
         TEXT_DIM,
     );
     y += 18.0;
     let root_r = Rect::from_min_size(pos2(ix, y), vec2(70.0, 20.0));
-    let root_text = v.scale_root.map_or("Off", |r| ROOTS[r as usize]);
+    let root_text = v.scale_root.map_or(tr("Off"), |r| ROOTS[r as usize]);
     let rresp = popup_button(ui, &gi, root_r, id("root_popup"), root_text);
     egui::Popup::menu(&rresp).show(|ui| {
-        if ui.selectable_label(v.scale_root.is_none(), "Off").clicked() {
+        if ui
+            .selectable_label(v.scale_root.is_none(), tr("Off"))
+            .clicked()
+        {
             v.scale_root = None;
             ui.close();
         }
@@ -1121,10 +1136,10 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         }
     });
     let mode_r = Rect::from_min_size(pos2(ix + 76.0, y), vec2(iw - 76.0 - 38.0, 20.0));
-    let mresp = popup_button(ui, &gi, mode_r, id("mode_popup"), MODES[v.scale_mode].0);
+    let mresp = popup_button(ui, &gi, mode_r, id("mode_popup"), tr(MODES[v.scale_mode].0));
     egui::Popup::menu(&mresp).show(|ui| {
         for (i, (label, _)) in MODES.iter().enumerate() {
-            if ui.selectable_label(v.scale_mode == i, *label).clicked() {
+            if ui.selectable_label(v.scale_mode == i, tr(label)).clicked() {
                 v.scale_mode = i;
                 ui.close();
             }
@@ -1157,7 +1172,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     gi.text(
         pos2(ix, y),
         Align2::LEFT_TOP,
-        "Velocity",
+        tr("Velocity"),
         FontId::proportional(11.5),
         TEXT_DIM,
     );
@@ -1189,7 +1204,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         }
     }
 
-    let hint = "Click: add · Drag: select · Del/Right-click: delete";
+    let hint = tr("Click: add · Drag: select · Del/Right-click: delete");
     let hint_font = FontId::proportional(10.5);
     let hint_text = crate::mixer::elide(&gi, hint, &hint_font, iw);
     gi.text(
@@ -1327,7 +1342,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     gv.text(
         vel_label.center(),
         Align2::CENTER_CENTER,
-        "Velocity",
+        tr("Velocity"),
         FontId::proportional(10.5),
         TEXT_DIM,
     );

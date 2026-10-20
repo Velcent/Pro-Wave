@@ -9,9 +9,11 @@ mod bench;
 mod engine_sync;
 mod file_commands;
 mod graphics;
+mod i18n;
 mod import;
 mod inspector;
 mod library;
+mod marker_track;
 mod menus;
 mod mixer;
 mod model;
@@ -22,6 +24,7 @@ mod piano_roll;
 mod project_io;
 mod recent_files;
 mod start_screen;
+mod tempo_track;
 mod theme;
 mod track_icons;
 mod tracks_area;
@@ -146,11 +149,11 @@ struct App {
 impl App {
     fn import(&mut self, path: &std::path::Path, ctx: &egui::Context) {
         if !import::is_audio_path(path) {
-            self.ui.status = Some(format!("not an audio file: {}", path.display()));
+            self.ui.status = Some(i18n::trf("not an audio file: {}", &[&path.display()]));
             return;
         }
         if let Err(e) = import::import_audio(&mut self.project, path, ctx) {
-            self.ui.status = Some(format!("cannot import {}: {e}", path.display()));
+            self.ui.status = Some(i18n::trf("cannot import {}: {}", &[&path.display(), &e]));
         }
     }
 }
@@ -240,6 +243,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         let dt = ctx.input(|i| i.stable_dt) as f64;
         ui_scale::apply(&ctx, self.ui.ui_scale);
+        tracks_area::poll_normalize(&ctx, &mut self.project, &mut self.ui);
         if let Some(probe) = self.bench.as_mut() {
             if probe.frame(&ctx) {
                 self.bench = None;
@@ -284,11 +288,15 @@ impl eframe::App for App {
             let load = sync.take_dsp_load();
             self.ui.cpu_load = load.max(self.ui.cpu_load - dt as f32 * 0.8);
             if sync.underruns() > 0 {
-                self.ui.status = Some(format!("disk too slow: {} underruns", sync.underruns()));
+                self.ui.status = Some(i18n::trf(
+                    "disk too slow: {} underruns",
+                    &[&sync.underruns()],
+                ));
             }
         } else if self.project.playing {
             // No audio device: fall back to a UI-driven clock.
-            self.project.position_beats += dt * self.project.tempo as f64 / 60.0;
+            let map = self.project.tempo_map();
+            self.project.position_beats = map.advance(self.project.position_beats, dt);
         }
         if self.project.playing {
             ctx.request_repaint();
@@ -424,6 +432,7 @@ fn main() -> eframe::Result {
         env!("CARGO_PKG_VERSION")
     ));
     init_logging();
+    i18n::init();
     project_io::remove_stale_media(std::time::Duration::from_secs(7 * 24 * 3600));
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1600.0, 980.0])
@@ -476,7 +485,8 @@ fn main() -> eframe::Result {
                 Ok(e) => Some(engine_sync::EngineSync::new(e, &project)),
                 Err(err) => {
                     tracing::warn!("audio disabled: {err}");
-                    audio_error = Some(format!("No sound: {err}. Check your audio device."));
+                    audio_error =
+                        Some(i18n::trf("No sound: {}. Check your audio device.", &[&err]));
                     None
                 }
             };
@@ -497,6 +507,29 @@ fn main() -> eframe::Result {
                 app.native_menu = Some(native_menu::NativeMenu::install(&cc.egui_ctx));
             }
             app.ui.status = audio_error;
+            if app.shots.is_some() {
+                // The pictures also show the Tempo track, with a few tempo changes.
+                app.ui.tracks.show_tempo = true;
+                app.ui.tracks.show_markers = true;
+                if let Some(r) = app
+                    .project
+                    .tracks
+                    .get_mut(4)
+                    .and_then(|t| t.regions.get_mut(0))
+                {
+                    r.params.fade_in = 4.0;
+                    r.params.fade_out = 8.0;
+                }
+                let bpb = app.project.beats_per_bar();
+                for (bar, name) in [(0.0, "Intro"), (4.0, "Verse"), (12.0, "Chorus")] {
+                    let i = app.project.add_marker(bar * bpb);
+                    app.project.markers[i].name = name.into();
+                }
+                app.project.add_tempo_change(32.0, 132.0);
+                app.project.add_tempo_change(48.0, 104.0);
+                app.saved = file_commands::content(&app.project);
+                app.history.reset(&app.project);
+            }
             if !measuring {
                 app.ui.recent = recent_files::Recent::load();
                 app.ui.ui_scale = ui_scale::load();

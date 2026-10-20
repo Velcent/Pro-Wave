@@ -2,6 +2,7 @@
 //! recent one or start from a template, as in Logic. Choosing queues a File command
 //! (`UiState::file_cmd`), so unsaved changes are asked about like everywhere else.
 use crate::file_commands::FileCmd;
+use crate::i18n::tr;
 use crate::model::{Project, Track, TrackKind};
 use crate::track_icons::{draw_icon, IconKind};
 use crate::UiState;
@@ -39,7 +40,7 @@ impl Template {
         }
     }
 
-    fn about(self) -> &'static str {
+    pub fn about(self) -> &'static str {
         match self {
             Template::Empty => "One software instrument track.",
             Template::Songwriter => "Piano, drummer, bass and vocal tracks.",
@@ -123,9 +124,9 @@ impl Section {
 
     fn label(self) -> &'static str {
         match self {
-            Section::NewProject => "New Project",
-            Section::Recent => "Recent",
-            Section::Templates => "Project Templates",
+            Section::NewProject => tr("New Project"),
+            Section::Recent => tr("Recent"),
+            Section::Templates => tr("Project Templates"),
         }
     }
 }
@@ -199,12 +200,12 @@ fn tile(ui: &egui::Ui, r: Rect, t: Template, selected: bool, key: usize) -> (boo
     g.text(
         pos2(r.center().x, r.bottom() - 40.0),
         Align2::CENTER_CENTER,
-        t.name(),
+        tr(t.name()),
         FontId::proportional(14.0),
         TEXT,
     );
     let about = g.layout(
-        t.about().to_string(),
+        tr(t.about()).to_string(),
         FontId::proportional(11.0),
         DIM,
         r.width() - 16.0,
@@ -307,7 +308,7 @@ pub fn show(ui: &mut egui::Ui, s: &mut UiState) {
                 ui.painter().text(
                     pos2(body.left(), list_top),
                     Align2::LEFT_TOP,
-                    "No recent projects. Start one from New Project or Project Templates.",
+                    tr("No recent projects. Start one from New Project or Project Templates."),
                     FontId::proportional(13.0),
                     DIM,
                 );
@@ -360,18 +361,18 @@ pub fn show(ui: &mut egui::Ui, s: &mut UiState) {
     let footer_ui = footer.shrink2(vec2(24.0, 12.0));
     ui.scope_builder(egui::UiBuilder::new().max_rect(footer_ui), |ui| {
         ui.horizontal_centered(|ui| {
-            if ui.button("Open an existing project…").clicked() {
+            if ui.button(tr("Open an existing project…")).clicked() {
                 s.file_cmd = Some(FileCmd::Open);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let can_choose = choice(&c, &recent).is_some();
                 let choose_btn =
-                    egui::Button::new(egui::RichText::new("Choose").color(Color32::WHITE))
+                    egui::Button::new(egui::RichText::new(tr("Choose")).color(Color32::WHITE))
                         .fill(ACCENT);
                 if ui.add_enabled(can_choose, choose_btn).clicked() {
                     chosen = choice(&c, &recent);
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(tr("Cancel")).clicked() {
                     cancel = true;
                 }
             });

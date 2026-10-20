@@ -1,5 +1,6 @@
 //! File > New… / Open… / Open Recent / Save / Save As… / Save A Copy As… / Revert to Saved:
 //! native dialogs (rfd), key commands and the "save changes?" and "revert?" prompts.
+use crate::i18n::{tr, trf};
 use crate::model::Project;
 use crate::start_screen::Template;
 use crate::{project_io, App};
@@ -75,7 +76,7 @@ pub fn content(p: &Project) -> ProjectDoc {
 }
 
 fn dialog() -> FileDialog {
-    FileDialog::new().add_filter("Pro Wave Project", &[prowave_project::EXTENSION])
+    FileDialog::new().add_filter(tr("Pro Wave Project"), &[prowave_project::EXTENSION])
 }
 
 /// The answer to the "save changes?" prompt.
@@ -109,7 +110,7 @@ impl App {
             FileCmd::New => self.replace(Project::empty(), None),
             FileCmd::NewFrom(t) => self.replace(t.project(), None),
             FileCmd::Open => {
-                if let Some(path) = dialog().set_title("Open Project").pick_file() {
+                if let Some(path) = dialog().set_title(tr("Open Project")).pick_file() {
                     self.open(&path, ctx);
                 }
             }
@@ -142,21 +143,21 @@ impl App {
             ui.set_width(380.0);
             ui.heading("Pro Wave");
             ui.add_space(6.0);
-            ui.label(format!(
+            ui.label(trf(
                 "Do you want to save the changes made to the project \"{}\"?",
-                self.project.name
+                &[&self.project.name],
             ));
-            ui.label("Your changes will be lost if you don't save them.");
+            ui.label(tr("Your changes will be lost if you don't save them."));
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ui.button("Don't Save").clicked() {
+                if ui.button(tr("Don't Save")).clicked() {
                     answer = Some(Answer::DontSave);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Save").clicked() {
+                    if ui.button(tr("Save")).clicked() {
                         answer = Some(Answer::Save);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         answer = Some(Answer::Cancel);
                     }
                 });
@@ -192,17 +193,17 @@ impl App {
             ui.set_width(380.0);
             ui.heading("Pro Wave");
             ui.add_space(6.0);
-            ui.label(format!(
+            ui.label(trf(
                 "Do you want to revert the project \"{}\" to the last saved version?",
-                self.project.name
+                &[&self.project.name],
             ));
-            ui.label("All changes made since it was saved will be lost.");
+            ui.label(tr("All changes made since it was saved will be lost."));
             ui.add_space(10.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Revert").clicked() {
+                if ui.button(tr("Revert")).clicked() {
                     answer = Some(true);
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(tr("Cancel")).clicked() {
                     answer = Some(false);
                 }
             });
@@ -224,9 +225,9 @@ impl App {
     fn request_revert(&mut self) {
         if self.path.is_none() {
             self.ui.status =
-                Some("nothing to revert to: the project has not been saved yet".into());
+                Some(tr("nothing to revert to: the project has not been saved yet").into());
         } else if content(&self.project) == self.saved {
-            self.ui.status = Some("no unsaved changes to revert".into());
+            self.ui.status = Some(tr("no unsaved changes to revert").into());
         } else {
             self.ui.ask_revert = true;
         }
@@ -246,12 +247,12 @@ impl App {
                 self.replace(p, Some(path.to_path_buf()));
                 self.ui.recent.add(path);
                 if !warnings.is_empty() {
-                    self.ui.status = Some(format!("missing media: {}", warnings.join(", ")));
+                    self.ui.status = Some(trf("missing media: {}", &[&warnings.join(", ")]));
                 }
             }
             Err(e) => {
                 self.ui.recent.remove(path);
-                self.ui.status = Some(format!("cannot open {}: {e}", path.display()));
+                self.ui.status = Some(trf("cannot open {}: {}", &[&path.display(), &e]));
             }
         }
     }
@@ -267,7 +268,7 @@ impl App {
     fn save_as(&mut self) -> bool {
         let name = format!("{}.{}", self.project.name, prowave_project::EXTENSION);
         match dialog()
-            .set_title("Save As")
+            .set_title(tr("Save As"))
             .set_file_name(name)
             .save_file()
         {
@@ -280,7 +281,7 @@ impl App {
     fn save_copy(&mut self) -> bool {
         let name = format!("{} copy.{}", self.project.name, prowave_project::EXTENSION);
         match dialog()
-            .set_title("Save A Copy As")
+            .set_title(tr("Save A Copy As"))
             .set_file_name(name)
             .save_file()
         {
@@ -294,11 +295,11 @@ impl App {
     pub fn save_copy_to(&mut self, path: &Path) -> bool {
         match project_io::save_project(&self.project, path) {
             Ok(path) => {
-                self.ui.status = Some(format!("saved a copy: {}", path.display()));
+                self.ui.status = Some(trf("saved a copy: {}", &[&path.display()]));
                 true
             }
             Err(e) => {
-                self.ui.status = Some(format!("cannot save {}: {e}", path.display()));
+                self.ui.status = Some(trf("cannot save {}: {}", &[&path.display(), &e]));
                 false
             }
         }
@@ -317,7 +318,7 @@ impl App {
                 true
             }
             Err(e) => {
-                self.ui.status = Some(format!("cannot save {}: {e}", path.display()));
+                self.ui.status = Some(trf("cannot save {}: {}", &[&path.display(), &e]));
                 false
             }
         }

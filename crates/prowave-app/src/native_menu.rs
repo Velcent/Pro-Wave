@@ -47,7 +47,7 @@ pub fn kind(label: &str) -> Kind {
         "About Pro Wave" => return Kind::Skip,
         _ => {}
     }
-    if crate::menus::CHECKABLE.contains(&label) {
+    if crate::menus::is_checkable(label) {
         return Kind::Check;
     }
     let accel = FileCmd::from_menu(label)
@@ -81,6 +81,7 @@ impl NativeMenu {
 #[cfg(target_os = "macos")]
 mod mac {
     use super::{kind, Accel, Kind, SystemItem};
+    use crate::i18n::{self, tr, Lang};
     use crate::model::Project;
     use crate::{menus, UiState};
     use muda::accelerator::{Accelerator, Code, Modifiers};
@@ -105,6 +106,29 @@ mod mac {
         plains: Vec<(&'static str, MenuItem, bool)>,
         recent_menu: Submenu,
         recent_shown: Vec<PathBuf>,
+        /// Every item with its English label, relabelled when the language changes.
+        labels: Vec<(&'static str, Label)>,
+        /// The language the labels are in.
+        lang: Lang,
+    }
+
+    /// A menu-bar item whose text follows the interface language.
+    enum Label {
+        Item(MenuItem),
+        Check(CheckMenuItem),
+        Sub(Submenu),
+        System(PredefinedMenuItem),
+    }
+
+    impl Label {
+        fn set_text(&self, text: &str) {
+            match self {
+                Label::Item(m) => m.set_text(text),
+                Label::Check(m) => m.set_text(text),
+                Label::Sub(m) => m.set_text(text),
+                Label::System(m) => m.set_text(text),
+            }
+        }
     }
 
     fn accelerator(a: Accel) -> Option<Accelerator> {
@@ -120,6 +144,48 @@ mod mac {
             Modifiers::META
         };
         Some(Accelerator::new(mods, code))
+    }
+
+    /// The system menu item for a menu-list entry; check-mark and plain entries are kept in
+    /// `checks` / `plains` so `update` can bring them up to date.
+    fn entry(
+        label: &'static str,
+        checks: &mut Vec<(&'static str, CheckMenuItem, bool, bool)>,
+        plains: &mut Vec<(&'static str, MenuItem, bool)>,
+        labels: &mut Vec<(&'static str, Label)>,
+    ) -> Option<Box<dyn IsMenuItem>> {
+        // Brought up to date by the first `update`.
+        let enabled = true;
+        let text = Some(tr(label));
+        let system = |m: PredefinedMenuItem, labels: &mut Vec<(&'static str, Label)>| {
+            labels.push((label, Label::System(m.clone())));
+            Box::new(m) as Box<dyn IsMenuItem>
+        };
+        Some(match kind(label) {
+            Kind::Skip => return None,
+            Kind::System(SystemItem::Minimize) => {
+                system(PredefinedMenuItem::minimize(text), labels)
+            }
+            Kind::System(SystemItem::Zoom) => system(PredefinedMenuItem::maximize(text), labels),
+            Kind::System(SystemItem::FullScreen) => {
+                system(PredefinedMenuItem::fullscreen(text), labels)
+            }
+            Kind::System(SystemItem::BringAllToFront) => {
+                system(PredefinedMenuItem::bring_all_to_front(text), labels)
+            }
+            Kind::Check => {
+                let c = CheckMenuItem::with_id(label, tr(label), enabled, false, None);
+                checks.push((label, c.clone(), false, enabled));
+                labels.push((label, Label::Check(c.clone())));
+                Box::new(c)
+            }
+            Kind::Plain(accel) => {
+                let m = MenuItem::with_id(label, tr(label), enabled, accel.and_then(accelerator));
+                plains.push((label, m.clone(), enabled));
+                labels.push((label, Label::Item(m.clone())));
+                Box::new(m)
+            }
+        })
     }
 
     impl NativeMenu {
@@ -142,18 +208,23 @@ mod mac {
             let app_menu = Submenu::new("Pro Wave", true);
             let quit = MenuItem::with_id(
                 QUIT,
-                "Quit Pro Wave",
+                tr("Quit Pro Wave"),
                 true,
                 Some(Accelerator::new(Modifiers::META, Code::KeyQ)),
             );
+            let about = PredefinedMenuItem::about(Some(tr("About Pro Wave")), Some(about));
+            let services = PredefinedMenuItem::services(Some(tr("Services")));
+            let hide = PredefinedMenuItem::hide(Some(tr("Hide Pro Wave")));
+            let hide_others = PredefinedMenuItem::hide_others(Some(tr("Hide Others")));
+            let show_all = PredefinedMenuItem::show_all(Some(tr("Show All")));
             let _ = app_menu.append_items(&[
-                &PredefinedMenuItem::about(Some("About Pro Wave"), Some(about)),
+                &about,
                 &PredefinedMenuItem::separator(),
-                &PredefinedMenuItem::services(None),
+                &services,
                 &PredefinedMenuItem::separator(),
-                &PredefinedMenuItem::hide(Some("Hide Pro Wave")),
-                &PredefinedMenuItem::hide_others(None),
-                &PredefinedMenuItem::show_all(None),
+                &hide,
+                &hide_others,
+                &show_all,
                 &PredefinedMenuItem::separator(),
                 &quit,
             ]);
@@ -161,9 +232,19 @@ mod mac {
 
             let mut checks = Vec::new();
             let mut plains = Vec::new();
-            let recent_menu = Submenu::new("Open Recent", true);
+            let mut labels = vec![
+                ("Quit Pro Wave", Label::Item(quit.clone())),
+                ("About Pro Wave", Label::System(about)),
+                ("Services", Label::System(services)),
+                ("Hide Pro Wave", Label::System(hide)),
+                ("Hide Others", Label::System(hide_others)),
+                ("Show All", Label::System(show_all)),
+            ];
+            let recent_menu = Submenu::new(tr("Open Recent"), true);
+            labels.push(("Open Recent", Label::Sub(recent_menu.clone())));
             for (title, items) in menus::MENUS {
-                let sub = Submenu::new(title, true);
+                let sub = Submenu::new(tr(title), true);
+                labels.push((title, Label::Sub(sub.clone())));
                 for &label in items {
                     if label == "-" {
                         let _ = sub.append(&PredefinedMenuItem::separator());
@@ -173,37 +254,23 @@ mod mac {
                         let _ = sub.append(&recent_menu);
                         continue;
                     }
-                    // Brought up to date by the first `update`.
-                    let enabled = true;
-                    let item: Box<dyn IsMenuItem> = match kind(label) {
-                        Kind::Skip => continue,
-                        Kind::System(SystemItem::Minimize) => {
-                            Box::new(PredefinedMenuItem::minimize(None))
+                    if let Some(children) = menus::submenu(label) {
+                        let inner = Submenu::new(tr(label), true);
+                        labels.push((label, Label::Sub(inner.clone())));
+                        for &child in children {
+                            if child == "-" {
+                                let _ = inner.append(&PredefinedMenuItem::separator());
+                            } else if let Some(item) =
+                                entry(child, &mut checks, &mut plains, &mut labels)
+                            {
+                                let _ = inner.append(item.as_ref());
+                            }
                         }
-                        Kind::System(SystemItem::Zoom) => {
-                            Box::new(PredefinedMenuItem::maximize(Some("Zoom")))
-                        }
-                        Kind::System(SystemItem::FullScreen) => {
-                            Box::new(PredefinedMenuItem::fullscreen(None))
-                        }
-                        Kind::System(SystemItem::BringAllToFront) => {
-                            Box::new(PredefinedMenuItem::bring_all_to_front(None))
-                        }
-                        Kind::Check => {
-                            let c = CheckMenuItem::with_id(label, label, enabled, false, None);
-                            checks.push((label, c.clone(), false, enabled));
-                            Box::new(c)
-                        }
-                        Kind::Plain(accel) => {
-                            let m = MenuItem::with_id(
-                                label,
-                                label,
-                                enabled,
-                                accel.and_then(accelerator),
-                            );
-                            plains.push((label, m.clone(), enabled));
-                            Box::new(m)
-                        }
+                        let _ = sub.append(&inner);
+                        continue;
+                    }
+                    let Some(item) = entry(label, &mut checks, &mut plains, &mut labels) else {
+                        continue;
                     };
                     let _ = sub.append(item.as_ref());
                 }
@@ -223,6 +290,8 @@ mod mac {
                 recent_menu,
                 // Differs from any real list, so the first `update` fills Open Recent.
                 recent_shown: vec![PathBuf::from("\0")],
+                labels,
+                lang: i18n::current(),
             };
             native.refresh_recent(&[]);
             native
@@ -242,7 +311,7 @@ mod mac {
             if !paths.is_empty() {
                 let _ = self.recent_menu.append(&PredefinedMenuItem::separator());
             }
-            let clear = MenuItem::with_id(RECENT_CLEAR, "Clear Menu", !paths.is_empty(), None);
+            let clear = MenuItem::with_id(RECENT_CLEAR, tr("Clear Menu"), !paths.is_empty(), None);
             let _ = self.recent_menu.append(&clear);
             self.recent_shown = paths.to_vec();
         }
@@ -286,6 +355,14 @@ mod mac {
                     item.set_enabled(on);
                     *was_enabled = on;
                 }
+            }
+            if self.lang != i18n::current() {
+                self.lang = i18n::current();
+                for (label, item) in &self.labels {
+                    item.set_text(tr(label));
+                }
+                // Open Recent's Clear Menu is rebuilt in the new language.
+                self.recent_shown = vec![PathBuf::from("\0")];
             }
             let paths = s.recent.paths().to_vec();
             self.refresh_recent(&paths);

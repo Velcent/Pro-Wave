@@ -37,7 +37,10 @@ pub fn import_audio(p: &mut Project, path: &Path, ctx: &egui::Context) -> Result
     let file = AudioFile::open(path)?;
     let beats_per_bar = p.beats_per_bar();
     let start_bar = (p.position_beats / beats_per_bar).floor() + 1.0;
-    let len_bars = file.duration_secs() * p.tempo as f64 / 60.0 / beats_per_bar;
+    // The region's length follows the Tempo track from where it starts.
+    let map = p.tempo_map();
+    let start = (start_bar - 1.0) * beats_per_bar;
+    let len_bars = (map.advance(start, file.duration_secs()) - start) / beats_per_bar;
     let name = path
         .file_stem()
         .and_then(|s| s.to_str())

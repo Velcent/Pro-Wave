@@ -5,6 +5,7 @@
 //! Regions, drag in the ruler to set the cycle, click to move the playhead, scroll, zoom
 //! (sliders and Ctrl+wheel), Catch playhead, add/duplicate tracks, M/S/R/I, volume, pan.
 //! Menu entries that are not implemented yet are shown disabled.
+use crate::i18n::{tr, trf};
 use crate::model::{Project, Region, Track, TrackKind};
 use crate::track_icons::{draw_icon, track_icon};
 use crate::widgets::{
@@ -55,11 +56,11 @@ impl Snap {
     ];
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Snap::Smart => "Smart",
-            Snap::Bar => "Bar",
-            Snap::Beat => "Beat",
-            Snap::Division => "Division",
-            Snap::Ticks => "Ticks",
+            Snap::Smart => tr("Smart"),
+            Snap::Bar => tr("Bar"),
+            Snap::Beat => tr("Beat"),
+            Snap::Division => tr("Division"),
+            Snap::Ticks => tr("Ticks"),
         }
     }
 }
@@ -83,16 +84,16 @@ impl DragMode {
     ];
     fn label(self) -> &'static str {
         match self {
-            DragMode::Overlap => "Overlap",
-            DragMode::NoOverlap => "No Overlap",
-            DragMode::XFade => "X-Fade",
-            DragMode::ShuffleR => "Shuffle R",
-            DragMode::ShuffleL => "Shuffle L",
+            DragMode::Overlap => tr("Overlap"),
+            DragMode::NoOverlap => tr("No Overlap"),
+            DragMode::XFade => tr("X-Fade"),
+            DragMode::ShuffleR => tr("Shuffle R"),
+            DragMode::ShuffleL => tr("Shuffle L"),
         }
     }
 }
 
-const TOOLS: [&str; 14] = [
+pub(crate) const TOOLS: [&str; 14] = [
     "Pointer Tool",
     "Pencil Tool",
     "Eraser Tool",
@@ -109,6 +110,16 @@ const TOOLS: [&str; 14] = [
     "Flex Tool",
 ];
 
+/// A Normalize Region Gain scan running on its own thread: reading a long recording to find
+/// its loudest sample takes seconds, which would freeze the window if done on the UI thread.
+pub struct NormalizeJob {
+    track: usize,
+    region: usize,
+    path: std::path::PathBuf,
+    /// The file's peak, or why it could not be read.
+    result: std::sync::mpsc::Receiver<Result<f32, String>>,
+}
+
 pub struct TracksView {
     /// Width of one bar in points (horizontal zoom).
     pub bar_w: f32,
@@ -119,12 +130,18 @@ pub struct TracksView {
     pub snap: Snap,
     pub drag_mode: DragMode,
     pub catch: bool,
+    /// Global Tempo track above the tracks (Track > Show Tempo Track).
+    pub show_tempo: bool,
+    /// Global Marker track above the tracks (Track > Show Marker Track).
+    pub show_markers: bool,
     /// (track, region)
     pub selected: Option<(usize, usize)>,
     /// Width of the lanes at the last frame (for Navigate > Zoom to Fit).
     pub lanes_w: f32,
     grab_beats: f64,
     cycle_anchor: Option<f64>,
+    /// Normalize Region Gain scans still running.
+    pub normalize_jobs: Vec<NormalizeJob>,
 }
 
 impl Default for TracksView {
@@ -138,9 +155,12 @@ impl Default for TracksView {
             snap: Snap::Smart,
             drag_mode: DragMode::NoOverlap,
             catch: true,
+            show_tempo: false,
+            show_markers: false,
             selected: None,
             grab_beats: 0.0,
             cycle_anchor: None,
+            normalize_jobs: Vec::new(),
         }
     }
 }
@@ -440,19 +460,19 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
 
     let mut x = bar.left() + 32.0;
     let sel = v.selected;
-    let (edit, w) = menu_title(ui, &g, x, cy, "Edit", id(("menu", "Edit")));
+    let (edit, w) = menu_title(ui, &g, x, cy, tr("Edit"), id(("menu", "Edit")));
     x += w + 2.0;
     egui::Popup::menu(&edit).show(|ui| {
         ui.set_min_width(260.0);
         crate::widgets::undo_items(ui, can_undo, can_redo, &mut undo_pick);
         ui.separator();
-        todo_item(ui, "Cut");
-        todo_item(ui, "Copy");
-        todo_item(ui, "Paste");
+        todo_item(ui, tr("Cut"));
+        todo_item(ui, tr("Copy"));
+        todo_item(ui, tr("Paste"));
         if ui
             .add_enabled(
                 sel.is_some(),
-                egui::Button::new("Delete").shortcut_text("Del"),
+                egui::Button::new(tr("Delete")).shortcut_text(tr("Del")),
             )
             .clicked()
         {
@@ -460,14 +480,14 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
             ui.close();
         }
         ui.separator();
-        todo_item(ui, "Select All");
-        todo_item(ui, "Split Regions at Playhead");
-        todo_item(ui, "Join Regions");
+        todo_item(ui, tr("Select All"));
+        todo_item(ui, tr("Split Regions at Playhead"));
+        todo_item(ui, tr("Join Regions"));
         let rep = shortcut(ui, Modifiers::COMMAND, Key::R);
         if ui
             .add_enabled(
                 sel.is_some(),
-                egui::Button::new("Repeat Regions").shortcut_text(rep),
+                egui::Button::new(tr("Repeat Regions")).shortcut_text(rep),
             )
             .clicked()
         {
@@ -478,46 +498,49 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
     if undo_pick.is_some() {
         s.undo_cmd = undo_pick;
     }
-    let (func, w) = menu_title(ui, &g, x, cy, "Functions", id(("menu", "Functions")));
+    let (func, w) = menu_title(ui, &g, x, cy, tr("Functions"), id(("menu", "Functions")));
     x += w + 2.0;
     egui::Popup::menu(&func).show(|ui| {
         ui.set_min_width(260.0);
         if ui
-            .add_enabled(sel.is_some(), egui::Button::new("Set Locators by Regions"))
+            .add_enabled(
+                sel.is_some(),
+                egui::Button::new(tr("Set Locators by Regions")),
+            )
             .clicked()
         {
             set_locators_by_region(p, v);
             ui.close();
         }
         ui.separator();
-        todo_item(ui, "Folder");
-        todo_item(ui, "Quantize");
-        todo_item(ui, "Bounce in Place…");
-        todo_item(ui, "Convert to New Sampler Track…");
-        todo_item(ui, "Move to Playhead");
+        todo_item(ui, tr("Folder"));
+        todo_item(ui, tr("Quantize"));
+        todo_item(ui, tr("Bounce in Place…"));
+        todo_item(ui, tr("Convert to New Sampler Track…"));
+        todo_item(ui, tr("Move to Playhead"));
     });
-    let (view, w) = menu_title(ui, &g, x, cy, "View", id(("menu", "View")));
+    let (view, w) = menu_title(ui, &g, x, cy, tr("View"), id(("menu", "View")));
     x += w + 10.0;
     egui::Popup::menu(&view).show(|ui| {
         ui.set_min_width(260.0);
-        if ui.button("Zoom to Fit").clicked() {
+        if ui.button(tr("Zoom to Fit")).clicked() {
             zoom_to_fit(p, v, lanes_w);
             ui.close();
         }
-        if ui.button("Zoom In").clicked() {
+        if ui.button(tr("Zoom In")).clicked() {
             v.bar_w = (v.bar_w * 1.25).min(600.0);
             ui.close();
         }
-        if ui.button("Zoom Out").clicked() {
+        if ui.button(tr("Zoom Out")).clicked() {
             v.bar_w = (v.bar_w / 1.25).max(6.0);
             ui.close();
         }
         ui.separator();
-        if ui.checkbox(&mut v.catch, "Catch Playhead").clicked() {
+        if ui.checkbox(&mut v.catch, tr("Catch Playhead")).clicked() {
             ui.close();
         }
-        todo_item(ui, "Show Global Tracks");
-        todo_item(ui, "Configure Track Header…");
+        todo_item(ui, tr("Show Global Tracks"));
+        todo_item(ui, tr("Configure Track Header…"));
     });
 
     // View buttons: grid (Live Loops) / list (Tracks, active).
@@ -556,7 +579,16 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
     draw_zoom_icon(&g, pos2(vz.left() - 13.0, cy), TEXT, true);
     // What fits between the two sides; the rest is left out rather than drawn on top.
     let mut rx = vz.left() - 30.0;
-    let show = fit_toolbar(rx - left_end);
+    // SNAP_W and DRAG_W allow for the English "Snap:" and "Drag:"; longer translations take
+    // the difference from the room left.
+    let label_w = |t: &str| {
+        g.layout_no_wrap(t.to_owned(), FontId::proportional(12.5), TEXT_DIM)
+            .size()
+            .x
+    };
+    let longer = (label_w(tr("Snap:")) - label_w("Snap:")).max(0.0)
+        + (label_w(tr("Drag:")) - label_w("Drag:")).max(0.0);
+    let show = fit_toolbar(rx - left_end - longer);
     // Waveform zoom / fit buttons (not implemented yet: drawn dim).
     for i in 0..2 {
         if !show.wave {
@@ -639,14 +671,14 @@ fn drag_menu(ui: &Ui, g: &Painter, v: &mut TracksView, rx: f32, cy: f32) -> f32 
             }
         }
     });
-    g.text(
+    let label = g.text(
         pos2(drag_r.left() - 6.0, cy),
         Align2::RIGHT_CENTER,
-        "Drag:",
+        tr("Drag:"),
         FontId::proportional(12.5),
         TEXT_DIM,
     );
-    drag_r.left() - 50.0
+    label.left() - 8.0
 }
 
 /// "Snap:" menu ending at `rx`; returns where the next item to its left ends.
@@ -661,14 +693,14 @@ fn snap_menu(ui: &Ui, g: &Painter, v: &mut TracksView, rx: f32, cy: f32) -> f32 
             }
         }
     });
-    g.text(
+    let label = g.text(
         pos2(snap_r.left() - 6.0, cy),
         Align2::RIGHT_CENTER,
-        "Snap:",
+        tr("Snap:"),
         FontId::proportional(12.5),
         TEXT_DIM,
     );
-    snap_r.left() - 54.0
+    label.left() - 12.0
 }
 
 /// Left-click and Command-click tool menus ending at `rx` (only the Pointer works so far).
@@ -701,7 +733,7 @@ fn tool_menus(ui: &Ui, g: &Painter, rx: f32, cy: f32) {
             ui.set_min_width(220.0);
             for (n, t) in TOOLS.iter().enumerate() {
                 if n == 0 {
-                    let _ = ui.selectable_label(true, *t);
+                    let _ = ui.selectable_label(true, tr(t));
                 } else {
                     todo_item(ui, t);
                 }
@@ -719,6 +751,8 @@ enum CtxAction {
     ZoomToFit,
     OpenPianoRoll,
     ToggleRegionMute(usize, usize),
+    ToggleReverse(usize, usize),
+    Normalize(usize, usize),
     RepeatRegion,
     LocatorsByRegion,
     DeleteRegion,
@@ -751,9 +785,9 @@ fn pick(ui: &mut Ui, label: &str, key: &str, action: CtxAction, picked: &mut Opt
 
 fn new_track_items(ui: &mut Ui, picked: &mut Option<CtxAction>) {
     for (label, kind) in [
-        ("New Software Instrument Track", TrackKind::Instrument),
-        ("New Audio Track", TrackKind::Audio),
-        ("New Aux Track", TrackKind::Aux),
+        (tr("New Software Instrument Track"), TrackKind::Instrument),
+        (tr("New Audio Track"), TrackKind::Audio),
+        (tr("New Aux Track"), TrackKind::Aux),
     ] {
         pick(ui, label, "", CtxAction::NewTrack(kind), picked);
     }
@@ -770,7 +804,7 @@ fn region_items(
     if !is_audio {
         pick(
             ui,
-            "Open in Piano Roll",
+            tr("Open in Piano Roll"),
             "",
             CtxAction::OpenPianoRoll,
             picked,
@@ -778,30 +812,46 @@ fn region_items(
         ui.separator();
     }
     let mute = if muted {
-        "Unmute Region"
+        tr("Unmute Region")
     } else {
-        "Mute Region"
+        tr("Mute Region")
     };
     pick(ui, mute, "", CtxAction::ToggleRegionMute(ti, ri), picked);
+    if is_audio {
+        pick(
+            ui,
+            tr("Normalize Region Gain"),
+            "",
+            CtxAction::Normalize(ti, ri),
+            picked,
+        );
+        pick(
+            ui,
+            tr("Reverse Region"),
+            "",
+            CtxAction::ToggleReverse(ti, ri),
+            picked,
+        );
+    }
     let repeat_key = ui
         .ctx()
         .format_shortcut(&egui::KeyboardShortcut::new(Modifiers::COMMAND, Key::R));
     pick(
         ui,
-        "Repeat Region",
+        tr("Repeat Region"),
         &repeat_key,
         CtxAction::RepeatRegion,
         picked,
     );
     pick(
         ui,
-        "Set Locators by Region",
+        tr("Set Locators by Region"),
         "",
         CtxAction::LocatorsByRegion,
         picked,
     );
     ui.separator();
-    pick(ui, "Delete", "⌫", CtxAction::DeleteRegion, picked);
+    pick(ui, tr("Delete"), "⌫", CtxAction::DeleteRegion, picked);
 }
 
 fn track_items(ui: &mut Ui, t: &TrackInfo, picked: &mut Option<CtxAction>) {
@@ -809,7 +859,7 @@ fn track_items(ui: &mut Ui, t: &TrackInfo, picked: &mut Option<CtxAction>) {
     ui.separator();
     pick(
         ui,
-        "Create Track Stack",
+        tr("Create Track Stack"),
         "",
         CtxAction::CreateStack(t.i),
         picked,
@@ -817,28 +867,36 @@ fn track_items(ui: &mut Ui, t: &TrackInfo, picked: &mut Option<CtxAction>) {
     if t.folder {
         pick(
             ui,
-            "Release Track Stack",
+            tr("Release Track Stack"),
             "",
             CtxAction::ReleaseStack(t.i),
             picked,
         );
     }
     ui.separator();
-    let mute = if t.mute { "Unmute Track" } else { "Mute Track" };
+    let mute = if t.mute {
+        tr("Unmute Track")
+    } else {
+        tr("Mute Track")
+    };
     pick(ui, mute, "", CtxAction::ToggleMute(t.i), picked);
-    let solo = if t.solo { "Unsolo Track" } else { "Solo Track" };
+    let solo = if t.solo {
+        tr("Unsolo Track")
+    } else {
+        tr("Solo Track")
+    };
     pick(ui, solo, "", CtxAction::ToggleSolo(t.i), picked);
     if t.custom_height {
         pick(
             ui,
-            "Reset Track Height",
+            tr("Reset Track Height"),
             "",
             CtxAction::ResetHeight(t.i),
             picked,
         );
     }
     ui.separator();
-    let delete = ui.add_enabled(!t.last, egui::Button::new("Delete Track"));
+    let delete = ui.add_enabled(!t.last, egui::Button::new(tr("Delete Track")));
     if delete.clicked() {
         *picked = Some(CtxAction::DeleteTrack(t.i));
     }
@@ -859,6 +917,12 @@ fn apply_ctx(action: CtxAction, p: &mut Project, s: &mut UiState, lanes_w: f32) 
                 p.song_rev += 1;
             }
         }
+        CtxAction::ToggleReverse(t, r) => {
+            if let Some(region) = p.tracks.get_mut(t).and_then(|t| t.regions.get_mut(r)) {
+                region.params.reverse = !region.params.reverse;
+            }
+        }
+        CtxAction::Normalize(t, r) => start_normalize(p, s, t, r),
         CtxAction::RepeatRegion => repeat_selected(p, v),
         CtxAction::LocatorsByRegion => set_locators_by_region(p, v),
         CtxAction::DeleteRegion => delete_selected(p, v),
@@ -885,6 +949,91 @@ fn apply_ctx(action: CtxAction, p: &mut Project, s: &mut UiState, lanes_w: f32) 
                 forget_track_indexes(s);
             }
         }
+    }
+}
+
+/// Logic's Normalize Region Gain: finds the region's loudest sample on a background thread,
+/// then [`poll_normalize`] sets the gain that brings it to 0 dBFS. The file is not changed.
+fn start_normalize(p: &Project, s: &mut UiState, track: usize, region: usize) {
+    let Some(audio) = p
+        .tracks
+        .get(track)
+        .and_then(|t| t.regions.get(region))
+        .and_then(|r| r.audio.as_ref())
+    else {
+        s.status = Some(tr("Normalize: this region has no recorded audio").into());
+        return;
+    };
+    let jobs = &mut s.tracks.normalize_jobs;
+    if jobs.iter().any(|j| (j.track, j.region) == (track, region)) {
+        return;
+    }
+    let file = audio.file.clone();
+    let path = file.path.clone();
+    let (tx, result) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("prowave-normalize".into())
+        .spawn(move || {
+            let peak = prowave_engine::peak_of(&file).map_err(|e| e.to_string());
+            let _ = tx.send(peak);
+        });
+    match spawned {
+        Ok(_) => {
+            jobs.push(NormalizeJob {
+                track,
+                region,
+                path,
+                result,
+            });
+            s.status = Some(tr("Normalizing…").into());
+        }
+        Err(e) => s.status = Some(format!("cannot start the normalize scan: {e}")),
+    }
+}
+
+/// Applies the Normalize Region Gain scans that have finished. Call once per frame.
+pub fn poll_normalize(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
+    use std::sync::mpsc::TryRecvError;
+    if s.tracks.normalize_jobs.is_empty() {
+        return;
+    }
+    let mut finished = Vec::new();
+    let mut message = None;
+    s.tracks
+        .normalize_jobs
+        .retain(|job| match job.result.try_recv() {
+            Err(TryRecvError::Empty) => true,
+            Err(TryRecvError::Disconnected) => false,
+            Ok(peak) => {
+                finished.push((job.track, job.region, job.path.clone(), peak));
+                false
+            }
+        });
+    for (track, region, path, peak) in finished {
+        // The project may have changed while the file was being read.
+        let Some(r) = p
+            .tracks
+            .get_mut(track)
+            .and_then(|t| t.regions.get_mut(region))
+            .filter(|r| r.audio.as_ref().is_some_and(|a| a.file.path == path))
+        else {
+            continue;
+        };
+        match peak {
+            Ok(peak) => match crate::model::RegionParams::normalize_gain(peak) {
+                Some(gain) => r.params.gain_db = gain,
+                None => message = Some(tr("Normalize: the region is silent").to_string()),
+            },
+            Err(e) => {
+                message = Some(trf("Normalize: cannot read {}: {}", &[&path.display(), &e]));
+            }
+        }
+    }
+    if s.tracks.normalize_jobs.is_empty() {
+        // Clears "Normalizing…" (or shows what went wrong).
+        s.status = message;
+    } else {
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
 }
 
@@ -1011,8 +1160,11 @@ fn draw_region(
     } else {
         Color32::from_white_alpha(if selected { 235 } else { 205 })
     };
+    let edit = region.audio.is_some() || track.kind == TrackKind::Audio;
     if let Some(peaks) = region.audio.as_ref().and_then(|a| a.peaks.get()) {
-        draw_peaks(g, inner, full.left(), full.width(), peaks, ink);
+        let gain = 10f32.powf(region.params.gain_db / 20.0);
+        let full_x = (full.left(), full.width());
+        draw_peaks(g, inner, full_x, peaks, gain, region.params.reverse, ink);
     } else if region.audio.is_some() {
         g.line_segment(
             [
@@ -1043,6 +1195,9 @@ fn draw_region(
             );
             g.rect_filled(nr, 0.0, ink);
         }
+    }
+    if edit {
+        draw_fades(g, rr, inner, full, region, beat_px);
     }
     let border = if selected {
         Color32::WHITE
@@ -1081,7 +1236,60 @@ fn fake_waveform(g: &Painter, rect: Rect, x0: f32, beat_px: f32, col: Color32, s
 }
 
 /// Real waveform from min/max peaks. `x0`/`full_w` describe the unclipped region.
-fn draw_peaks(g: &Painter, body: Rect, x0: f32, full_w: f32, peaks: &[(f32, f32)], col: Color32) {
+/// Shades what the region's fades take away: a triangle from the region's start up to where
+/// the fade in ends, and one down to the region's end for the fade out, with the curve's line.
+fn draw_fades(g: &Painter, rr: Rect, inner: Rect, full: Rect, region: &Region, beat_px: f32) {
+    let (fin, fout) = (region.params.fade_in, region.params.fade_out);
+    if fin <= 0.0 && fout <= 0.0 {
+        return;
+    }
+    let g = g.with_clip_rect(g.clip_rect().intersect(rr));
+    let shade = Color32::from_black_alpha(110);
+    let line = Stroke::new(1.2, Color32::from_white_alpha(220));
+    let curve = |x: f32| match region.params.fade_curve {
+        prowave_engine::FadeCurve::Linear => x,
+        prowave_engine::FadeCurve::EqualPower => (x * std::f32::consts::FRAC_PI_2).sin(),
+        prowave_engine::FadeCurve::SCurve => x * x * (3.0 - 2.0 * x),
+    };
+    // `x0` where the fade is silent, `x1` where it reaches full level.
+    let fade = |x0: f32, x1: f32| {
+        const STEPS: usize = 16;
+        let pts: Vec<Pos2> = (0..=STEPS)
+            .map(|k| {
+                let t = k as f32 / STEPS as f32;
+                let y = inner.bottom() - curve(t) * inner.height();
+                pos2(x0 + (x1 - x0) * t, y)
+            })
+            .collect();
+        for w in pts.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            g.add(Shape::convex_polygon(
+                vec![pos2(a.x, inner.top()), pos2(b.x, inner.top()), b, a],
+                shade,
+                Stroke::NONE,
+            ));
+        }
+        g.add(Shape::line(pts, line));
+    };
+    if fin > 0.0 {
+        fade(full.left(), full.left() + fin * beat_px);
+    }
+    if fout > 0.0 {
+        fade(full.right(), full.right() - fout * beat_px);
+    }
+}
+
+/// Draws a recorded waveform: `full_x` is the left edge and width of the whole region on
+/// screen, `gain` its region gain (linear) and `reverse` plays it back to front.
+fn draw_peaks(
+    g: &Painter,
+    body: Rect,
+    (x0, full_w): (f32, f32),
+    peaks: &[(f32, f32)],
+    gain: f32,
+    reverse: bool,
+    col: Color32,
+) {
     if peaks.is_empty() || full_w <= 0.0 {
         return;
     }
@@ -1095,9 +1303,15 @@ fn draw_peaks(g: &Painter, body: Rect, x0: f32, full_w: f32, peaks: &[(f32, f32)
         }
         let b =
             ((((x + 1.0 - x0) / full_w) * peaks.len() as f32) as usize).clamp(a + 1, peaks.len());
+        let (a, b) = if reverse {
+            (peaks.len() - b, peaks.len() - a)
+        } else {
+            (a, b)
+        };
         let (lo, hi) = peaks[a..b]
             .iter()
             .fold((0f32, 0f32), |(l, h), p| (l.min(p.0), h.max(p.1)));
+        let (lo, hi) = (lo * gain, hi * gain);
         g.line_segment(
             [
                 pos2(x, mid - hi.min(1.0) * half),
@@ -1341,11 +1555,23 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     ui.allocate_rect(area, Sense::hover());
     let tb = Rect::from_min_size(area.min, vec2(area.width(), TOOLBAR_H));
     let ruler_y = tb.bottom();
+    // Global tracks between the ruler and the tracks: Marker, then Tempo, as in Logic.
+    let marker_h = if s.tracks.show_markers {
+        crate::marker_track::HEIGHT
+    } else {
+        0.0
+    };
+    let tempo_h = if s.tracks.show_tempo {
+        crate::tempo_track::HEIGHT
+    } else {
+        0.0
+    };
+    let tracks_y = ruler_y + RULER_H + marker_h + tempo_h;
     let headers = Rect::from_min_max(
-        pos2(area.left(), ruler_y + RULER_H),
+        pos2(area.left(), tracks_y),
         pos2(area.left() + HEADER_W, area.bottom()),
     );
-    let lanes = Rect::from_min_max(pos2(area.left() + HEADER_W, ruler_y + RULER_H), area.max);
+    let lanes = Rect::from_min_max(pos2(area.left() + HEADER_W, tracks_y), area.max);
     let ruler = Rect::from_min_max(
         pos2(lanes.left(), ruler_y),
         pos2(area.right(), ruler_y + RULER_H),
@@ -1450,7 +1676,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     context_menu(&lane_resp, |ui| {
         new_track_items(ui, &mut picked);
         ui.separator();
-        if ui.button("Zoom to Fit").clicked() {
+        if ui.button(tr("Zoom to Fit")).clicked() {
             picked = Some(CtxAction::ZoomToFit);
         }
     });
@@ -1523,6 +1749,34 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     }
     if moved {
         p.song_rev += 1;
+    }
+
+    if marker_h > 0.0 {
+        let top = ruler_y + RULER_H;
+        crate::marker_track::show(
+            ui,
+            p,
+            Rect::from_min_max(
+                pos2(area.left(), top),
+                pos2(headers.right(), top + marker_h),
+            ),
+            Rect::from_min_max(pos2(lanes.left(), top), pos2(area.right(), top + marker_h)),
+            x_of,
+            beat_of,
+            step,
+        );
+    }
+    if tempo_h > 0.0 {
+        let top = ruler_y + RULER_H + marker_h;
+        crate::tempo_track::show(
+            ui,
+            p,
+            Rect::from_min_max(pos2(area.left(), top), pos2(headers.right(), tracks_y)),
+            Rect::from_min_max(pos2(lanes.left(), top), pos2(area.right(), tracks_y)),
+            x_of,
+            beat_of,
+            step,
+        );
     }
 
     // ---- keyboard: Delete, Cmd/Ctrl+R
@@ -1950,5 +2204,94 @@ mod row_tests {
         // Divisions are 16th notes in any signature.
         assert_eq!(snap_step(Snap::Division, 20.0, 3.0, 0.5), 0.25);
         assert_eq!(snap_step(Snap::Smart, 60.0, 3.0, 0.5), 0.25);
+    }
+
+    /// A 0.5 s mono 16-bit 44.1 kHz WAV: a square wave at `amp` (0..1), or silence for 0.
+    fn write_square_wav(path: &std::path::Path, amp: f32) {
+        let n = 22_050u32;
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + n * 2).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&44_100u32.to_le_bytes());
+        b.extend_from_slice(&88_200u32.to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&(n * 2).to_le_bytes());
+        for i in 0..n {
+            let s = if (i / 50) % 2 == 0 { amp } else { -amp };
+            b.extend_from_slice(&((s * 32767.0) as i16).to_le_bytes());
+        }
+        std::fs::write(path, b).unwrap();
+    }
+
+    /// Runs `poll_normalize` until the scan is over (it reads the file on another thread).
+    fn wait_for_normalize(p: &mut Project, s: &mut UiState) {
+        let ctx = egui::Context::default();
+        let began = std::time::Instant::now();
+        while !s.tracks.normalize_jobs.is_empty() {
+            assert!(began.elapsed().as_secs() < 10, "the scan never finished");
+            poll_normalize(&ctx, p, s);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn project_with_wav(amp: f32) -> (Project, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("take.wav");
+        write_square_wav(&wav, amp);
+        let mut p = Project::empty();
+        crate::import::import_audio(&mut p, &wav, &egui::Context::default()).unwrap();
+        (p, dir)
+    }
+
+    #[test]
+    fn normalize_reads_the_file_in_the_background_and_sets_the_gain() {
+        let (mut p, _dir) = project_with_wav(0.25);
+        let (t, mut s) = (p.tracks.len() - 1, UiState::new());
+        start_normalize(&p, &mut s, t, 0);
+        assert_eq!(s.tracks.normalize_jobs.len(), 1);
+        assert_eq!(s.status.as_deref(), Some("Normalizing…"));
+        start_normalize(&p, &mut s, t, 0);
+        assert_eq!(s.tracks.normalize_jobs.len(), 1, "one scan per region");
+        wait_for_normalize(&mut p, &mut s);
+        // A peak of 0.25 needs +12.04 dB to reach full scale.
+        let gain = p.tracks[t].regions[0].params.gain_db;
+        assert!((gain - 12.04).abs() < 0.05, "gain {gain}");
+        assert_eq!(s.status, None, "the message goes away when it is done");
+    }
+
+    #[test]
+    fn normalize_reports_silence_and_regions_without_audio() {
+        let (mut p, _dir) = project_with_wav(0.0);
+        let (t, mut s) = (p.tracks.len() - 1, UiState::new());
+        start_normalize(&p, &mut s, t, 0);
+        wait_for_normalize(&mut p, &mut s);
+        assert_eq!(p.tracks[t].regions[0].params.gain_db, 0.0);
+        assert_eq!(s.status.as_deref(), Some("Normalize: the region is silent"));
+        // A MIDI region has nothing to scan.
+        let mut s = UiState::new();
+        start_normalize(&Project::demo(), &mut s, 0, 0);
+        assert!(s.tracks.normalize_jobs.is_empty());
+        assert_eq!(
+            s.status.as_deref(),
+            Some("Normalize: this region has no recorded audio")
+        );
+    }
+
+    #[test]
+    fn a_scan_for_a_region_that_has_gone_changes_nothing() {
+        let (mut p, _dir) = project_with_wav(0.25);
+        let (t, mut s) = (p.tracks.len() - 1, UiState::new());
+        start_normalize(&p, &mut s, t, 0);
+        // The user deletes the region while the file is being read.
+        p.tracks[t].regions.clear();
+        wait_for_normalize(&mut p, &mut s);
+        assert!(p.tracks[t].regions.is_empty());
+        assert_eq!(s.status, None);
     }
 }

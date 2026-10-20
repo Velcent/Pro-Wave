@@ -3,6 +3,7 @@
 //! now, or are not implemented yet, are greyed out (see [`enabled`]). The Smart Controls button in the control bar switches the bar and its
 //! menus between the dark look and the light (white) macOS look (`UiState::light_menus`).
 use crate::file_commands::FileCmd;
+use crate::i18n::{self, tr, trf, Lang};
 use crate::model::{Project, TrackKind};
 use crate::undo::UndoCmd;
 use crate::Bottom;
@@ -15,17 +16,107 @@ const FILE: &[&str] = &[
     "Open Recent",
     "-",
     "Close",
+    "Close Project",
     "Save",
     "Save As…",
     "Save A Copy As…",
     "Save as Template…",
-    "Revert to Saved",
+    "Revert to",
+    "-",
+    "Alternatives",
+    "Project Management",
+    "Project Settings",
+    "-",
+    "Page Setup…",
+    "Print",
+    "-",
+    "Movie",
     "-",
     "Import",
     "Export",
     "Bounce",
     "Share",
+    "-",
+    "Show in File Manager",
+    "Open in Sound Library Manager",
+    "-",
+    "Project Alternatives…",
 ];
+
+/// Entries that open a submenu (▸), as in Logic, and what is in each. "Open Recent" is filled
+/// with the remembered projects instead.
+const SUBMENUS: &[(&str, &[&str])] = &[
+    ("Revert to", &["Revert to Saved"]),
+    (
+        "Alternatives",
+        &[
+            "New Alternative…",
+            "Rename Alternative…",
+            "Delete Alternative",
+        ],
+    ),
+    (
+        "Project Management",
+        &["Clean Up…", "Consolidate…", "Rename Project…"],
+    ),
+    (
+        "Project Settings",
+        &[
+            "General…",
+            "Synchronization…",
+            "Metronome…",
+            "Recording…",
+            "Tuning…",
+            "Audio…",
+            "MIDI…",
+        ],
+    ),
+    ("Movie", &["Open Movie…", "Remove Movie"]),
+    ("Import", &["Audio File…", "MIDI File…", "Other Projects…"]),
+    (
+        "Export",
+        &[
+            "Selection as MIDI File…",
+            "Track as Audio File…",
+            "All Tracks as Audio Files…",
+            "Score as MusicXML…",
+        ],
+    ),
+    (
+        "Bounce",
+        &[
+            "Project or Section…",
+            "Regions in Place…",
+            "Tracks in Place…",
+        ],
+    ),
+    ("Share", &["Song to File…", "Song to Mobile Device…"]),
+    ("Language", LANGUAGE),
+];
+
+/// What is in the submenu opened by `label`, if it opens one.
+pub(crate) fn submenu(label: &str) -> Option<&'static [&'static str]> {
+    SUBMENUS
+        .iter()
+        .find(|(title, _)| *title == label)
+        .map(|(_, items)| *items)
+}
+
+/// Every entry that runs something, submenus included (not separators or submenu titles).
+#[cfg(test)]
+pub(crate) fn all_entries() -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for (_, items) in MENUS {
+        for &it in items {
+            match submenu(it) {
+                Some(children) => out.extend_from_slice(children),
+                None => out.push(it),
+            }
+        }
+    }
+    out.retain(|it| *it != "-" && *it != "Open Recent");
+    out
+}
 const EDIT: &[&str] = &[
     "Undo",
     "Redo",
@@ -73,6 +164,8 @@ const NAVIGATE: &[&str] = &[
     "-",
     "Go to Next Marker",
     "Go to Previous Marker",
+    "Create Marker",
+    "Delete Marker",
     "-",
     "Go to Next Region",
     "Go to Previous Region",
@@ -174,7 +267,35 @@ const WINDOW: &[&str] = &[
     "-",
     "Bring All to Front",
 ];
-const HELP: &[&str] = &["Quick Help", "Logic-style Key Commands…", "About Pro Wave"];
+const HELP: &[&str] = &[
+    "Quick Help",
+    "Logic-style Key Commands…",
+    "-",
+    "Language",
+    "-",
+    "About Pro Wave",
+];
+
+/// Help > Language: every language, each named in its own language.
+const LANGUAGE: &[&str] = &[
+    "English (Default)",
+    "简体中文",
+    "日本語",
+    "Français",
+    "Deutsch",
+    "Español",
+    "Português (Portugal)",
+    "Português (Brasil)",
+    "Filipino",
+    "Bahasa Indonesia",
+    "हिन्दी",
+    "Українська",
+    "Norsk",
+    "Svenska",
+    "Suomi",
+    "Polski",
+    "Lietuvių",
+];
 
 /// The menus in bar order, used by the in-window bar and the macOS menu bar.
 pub(crate) const MENUS: [(&str, &[&str]); 9] = [
@@ -191,6 +312,8 @@ pub(crate) const MENUS: [(&str, &[&str]); 9] = [
 
 /// Entries that can show a check mark (see [`checked`]).
 pub(crate) const CHECKABLE: &[&str] = &[
+    "Show Tempo Track",
+    "Show Marker Track",
     "Show Piano Roll",
     "Show Mixer",
     "Show Library",
@@ -201,6 +324,11 @@ pub(crate) const CHECKABLE: &[&str] = &[
     "Show Colors",
     "Show Grid",
 ];
+
+/// Whether `label` shows a check mark when it is on: [`CHECKABLE`] and the Language entries.
+pub(crate) fn is_checkable(label: &str) -> bool {
+    CHECKABLE.contains(&label) || Lang::from_native_name(label).is_some()
+}
 
 /// Whether the menu bar is drawn inside the window. On macOS the menus go in the system menu
 /// bar at the top of the screen instead (`native_menu`).
@@ -291,7 +419,7 @@ fn shortcut(label: &str) -> Option<KeyboardShortcut> {
 /// Whether `label` can be chosen now. Entries that are not implemented yet are greyed out,
 /// so a click never silently does nothing; others are greyed while there is nothing to act on.
 pub(crate) fn enabled(label: &str, p: &Project, s: &crate::UiState) -> bool {
-    if FileCmd::from_menu(label).is_some() {
+    if FileCmd::from_menu(label).is_some() || is_checkable(label) && !CHECKABLE.contains(&label) {
         return true;
     }
     match label {
@@ -304,6 +432,9 @@ pub(crate) fn enabled(label: &str, p: &Project, s: &crate::UiState) -> bool {
             .tracks
             .get(p.selected_track)
             .is_some_and(|t| t.kind == TrackKind::Folder),
+        "Go to Next Marker" => p.next_marker(p.position_beats).is_some(),
+        "Go to Previous Marker" => p.previous_marker(p.position_beats).is_some(),
+        "Delete Marker" => p.marker_at(p.position_beats).is_some(),
         "Go to Next Region" | "Go to Previous Region" => {
             p.tracks.iter().any(|t| !t.regions.is_empty())
         }
@@ -323,6 +454,9 @@ pub(crate) fn enabled(label: &str, p: &Project, s: &crate::UiState) -> bool {
         | "Show Mixer"
         | "Show Library"
         | "Show Inspector"
+        | "Show Tempo Track"
+        | "Show Marker Track"
+        | "Create Marker"
         | "Mixer"
         | "Piano Roll"
         | "Bigger Interface"
@@ -352,6 +486,11 @@ pub(crate) fn checked(label: &str, s: &crate::UiState) -> bool {
         "Show Mixer" => s.show_mixer && s.bottom == Bottom::Mixer,
         "Show Library" => s.show_library,
         "Show Inspector" => s.show_inspector,
+        "Show Tempo Track" => s.tracks.show_tempo,
+        "Show Marker Track" => s.tracks.show_markers,
+        _ if Lang::from_native_name(label).is_some() => {
+            Lang::from_native_name(label) == Some(i18n::current())
+        }
         // Always visible in this app.
         "Show Toolbar" | "Show Track Header" | "Show Ruler" | "Show Colors" | "Show Grid" => true,
         _ => false,
@@ -366,6 +505,10 @@ fn forget_region_selection(s: &mut crate::UiState) {
 
 /// Runs a menu entry (File entries are queued in `UiState::file_cmd` for `App`).
 pub(crate) fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
+    if let Some(lang) = Lang::from_native_name(label) {
+        i18n::choose(lang);
+        return;
+    }
     match label {
         "Show Mixer" | "Mixer" => {
             s.show_mixer = !(s.show_mixer && s.bottom == Bottom::Mixer);
@@ -373,6 +516,29 @@ pub(crate) fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
         }
         "Show Library" => s.show_library = !s.show_library,
         "Show Inspector" => s.show_inspector = !s.show_inspector,
+        "Show Tempo Track" => s.tracks.show_tempo = !s.tracks.show_tempo,
+        "Show Marker Track" => s.tracks.show_markers = !s.tracks.show_markers,
+        // Logic: Create Marker puts it at the playhead, rounded to the nearest bar.
+        "Create Marker" => {
+            let bpb = p.beats_per_bar();
+            p.add_marker((p.position_beats / bpb).round() * bpb);
+            s.tracks.show_markers = true;
+        }
+        "Delete Marker" => {
+            if let Some(i) = p.marker_at(p.position_beats) {
+                p.markers.remove(i);
+            }
+        }
+        "Go to Next Marker" => {
+            if let Some(b) = p.next_marker(p.position_beats) {
+                p.position_beats = b;
+            }
+        }
+        "Go to Previous Marker" => {
+            if let Some(b) = p.previous_marker(p.position_beats) {
+                p.position_beats = b;
+            }
+        }
         "Show Piano Roll" | "Piano Roll" => {
             s.bottom = if s.bottom == Bottom::PianoRoll {
                 Bottom::Mixer
@@ -456,20 +622,55 @@ pub(crate) fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
 }
 
 /// One menu entry that is always enabled (the Open Recent list).
-fn item(ui: &mut egui::Ui, label: &str, check: bool, key: Option<String>, look: &Look) -> bool {
-    item_with(ui, label, true, check, key, look)
+/// Height of a menu entry and size of its text, in points (macOS menus).
+const ROW_H: f32 = 19.0;
+const FONT: f32 = 13.0;
+/// Left column (check mark) and right padding of an entry.
+const CHECK_W: f32 = 22.0;
+const RIGHT_PAD: f32 = 10.0;
+/// Gap between an entry's title and its key command or arrow.
+const KEY_GAP: f32 = 28.0;
+
+/// Width of a menu holding `labels` (and their key commands), so it is as wide as its longest
+/// entry, like a macOS menu, instead of stretching across the window.
+fn menu_width(ui: &egui::Ui, labels: &[String]) -> f32 {
+    let font = FontId::proportional(FONT);
+    let width = |t: &str| {
+        ui.painter()
+            .layout_no_wrap(t.to_owned(), font.clone(), Color32::WHITE)
+            .size()
+            .x
+    };
+    let (mut title, mut key) = (0.0f32, 0.0f32);
+    for it in labels.iter().filter(|l| *l != "-") {
+        title = title.max(width(tr(it)));
+        if let Some(k) = shortcut(it) {
+            key = key.max(width(&ui.ctx().format_shortcut(&k)));
+        }
+        if submenu(it).is_some() || it == "Open Recent" {
+            key = key.max(8.0);
+        }
+    }
+    let gap = if key > 0.0 { KEY_GAP } else { 12.0 };
+    (CHECK_W + title + gap + key + RIGHT_PAD).max(120.0)
 }
 
-/// Like [`item`], with the greyed-out state given by the caller.
-fn item_with(
+/// One entry: check-mark column, title, then the key command or a submenu arrow on the right.
+fn row(
     ui: &mut egui::Ui,
     label: &str,
     enabled: bool,
     check: bool,
     key: Option<String>,
+    arrow: bool,
     look: &Look,
-) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::click());
+) -> egui::Response {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), sense);
     let hot = enabled && resp.hovered();
     let g = ui.painter();
     if hot {
@@ -480,10 +681,10 @@ fn item_with(
         (true, true) => look.hover_text,
         (true, false) => look.text,
     };
-    let font = FontId::proportional(13.0);
+    let font = FontId::proportional(FONT);
     if check {
         g.text(
-            pos2(rect.left() + 8.0, rect.center().y),
+            pos2(rect.left() + 7.0, rect.center().y),
             Align2::LEFT_CENTER,
             "✔",
             FontId::proportional(11.0),
@@ -491,23 +692,29 @@ fn item_with(
         );
     }
     g.text(
-        pos2(rect.left() + 24.0, rect.center().y),
+        pos2(rect.left() + CHECK_W, rect.center().y),
         Align2::LEFT_CENTER,
         label,
         font.clone(),
         color,
     );
-    if let Some(key) = key {
+    let right = pos2(rect.right() - RIGHT_PAD, rect.center().y);
+    if arrow {
+        let c = right + vec2(-3.0, 0.0);
+        g.add(egui::Shape::convex_polygon(
+            vec![
+                c + vec2(-3.0, -4.0),
+                c + vec2(3.0, 0.0),
+                c + vec2(-3.0, 4.0),
+            ],
+            color,
+            Stroke::NONE,
+        ));
+    } else if let Some(key) = key {
         let key_color = if hot { look.hover_text } else { look.dim };
-        g.text(
-            pos2(rect.right() - 10.0, rect.center().y),
-            Align2::RIGHT_CENTER,
-            key,
-            font,
-            key_color,
-        );
+        g.text(right, Align2::RIGHT_CENTER, key, font, key_color);
     }
-    enabled && resp.clicked()
+    resp
 }
 
 fn separator(ui: &mut egui::Ui, look: &Look) {
@@ -528,57 +735,83 @@ fn recent_label(path: &std::path::Path) -> String {
         .and_then(|d| d.file_name())
         .and_then(|d| d.to_str())
     {
-        Some(folder) => format!("    {name}  ({folder})"),
-        None => format!("    {name}"),
+        Some(folder) => format!("{name}  ({folder})"),
+        None => name.to_string(),
     }
 }
 
-/// "Open Recent" with the remembered projects under it. They are listed flat, because this
-/// menu has no submenus.
+/// The Open Recent submenu: the remembered projects, then Clear Menu.
 fn recent_items(ui: &mut egui::Ui, s: &mut crate::UiState, look: &Look) {
-    item_with(ui, "Open Recent", false, false, None, look);
-    if s.recent.paths().is_empty() {
-        item_with(ui, "    (none)", false, false, None, look);
-        return;
-    }
+    let labels: Vec<String> = s.recent.paths().iter().map(|p| recent_label(p)).collect();
+    let mut sized = labels.clone();
+    sized.push(tr("Clear Menu").into());
+    ui.set_width(menu_width(ui, &sized));
+    ui.spacing_mut().item_spacing.y = 0.0;
     let mut picked = None;
-    for path in s.recent.paths() {
-        if item(ui, &recent_label(path), false, None, look) {
+    for (label, path) in labels.iter().zip(s.recent.paths()) {
+        if row(ui, label, true, false, None, false, look).clicked() {
             picked = Some(path.clone());
         }
     }
+    if !labels.is_empty() {
+        separator(ui, look);
+    }
+    let clear = row(
+        ui,
+        tr("Clear Menu"),
+        !labels.is_empty(),
+        false,
+        None,
+        false,
+        look,
+    );
     if let Some(path) = picked {
         s.recent_pick = Some(path);
         s.file_cmd = Some(FileCmd::OpenRecent);
         ui.close();
-    } else if item(ui, "    Clear Menu", false, None, look) {
+    } else if clear.clicked() {
         s.recent.clear();
         ui.close();
     }
 }
 
-fn menu(ui: &mut egui::Ui, title: &str, items: &[&str], p: &mut Project, s: &mut crate::UiState) {
+/// The entries of one menu or submenu.
+fn entries(ui: &mut egui::Ui, items: &[&str], p: &mut Project, s: &mut crate::UiState) {
     let look = look(s.light_menus);
-    let title = egui::RichText::new(title).color(look.bar_text);
-    ui.menu_button(title, |ui| {
-        ui.set_min_width(260.0);
-        ui.spacing_mut().item_spacing.y = 0.0;
-        for it in items {
-            if *it == "-" {
-                separator(ui, look);
-                continue;
-            }
-            if *it == "Open Recent" {
-                recent_items(ui, s, look);
-                continue;
-            }
-            let key = shortcut(it).map(|k| ui.ctx().format_shortcut(&k));
-            if item_with(ui, it, enabled(it, p, s), checked(it, s), key, look) {
-                apply(it, p, s);
-                ui.close();
-            }
+    let labels: Vec<String> = items.iter().map(|it| it.to_string()).collect();
+    ui.set_width(menu_width(ui, &labels));
+    ui.spacing_mut().item_spacing.y = 0.0;
+    for &it in items {
+        if it == "-" {
+            separator(ui, look);
+            continue;
         }
-    });
+        if it == "Open Recent" {
+            let resp = row(ui, tr(it), true, false, None, true, look);
+            egui::containers::menu::SubMenu::new().show(ui, &resp, |ui| recent_items(ui, s, look));
+            continue;
+        }
+        if let Some(children) = submenu(it) {
+            let on = children.iter().any(|c| enabled(c, p, s));
+            let resp = row(ui, tr(it), on, false, None, true, look);
+            if on {
+                egui::containers::menu::SubMenu::new()
+                    .show(ui, &resp, |ui| entries(ui, children, p, s));
+            }
+            continue;
+        }
+        let key = shortcut(it).map(|k| ui.ctx().format_shortcut(&k));
+        let (on, check) = (enabled(it, p, s), checked(it, s));
+        if row(ui, tr(it), on, check, key, false, look).clicked() {
+            apply(it, p, s);
+            ui.close();
+        }
+    }
+}
+
+fn menu(ui: &mut egui::Ui, title: &str, items: &[&str], p: &mut Project, s: &mut crate::UiState) {
+    let title = egui::RichText::new(tr(title)).color(look(s.light_menus).bar_text);
+    ui.menu_button(title, |ui| entries(ui, items, p, s));
 }
 
 /// Style of the bar buttons and of the drop-down menus for the current look.
@@ -693,8 +926,13 @@ pub fn status_line(ui: &mut egui::Ui, p: &Project, s: &crate::UiState) {
     // The engine plays only its first MAX_TRACKS tracks; say so instead of failing silently.
     let max = prowave_engine::MAX_TRACKS;
     if p.tracks.len() > max {
-        ui.colored_label(warn, format!("Tracks {}–{} are silent (limit {max})", max + 1, p.tracks.len()))
-            .on_hover_text("The audio engine plays up to 64 tracks. Tracks after that are kept in the project but not played.");
+        let text = trf(
+            "Tracks {}–{} are silent (limit {})",
+            &[&(max + 1), &p.tracks.len(), &max],
+        );
+        ui.colored_label(warn, text).on_hover_text(tr(
+            "The audio engine plays up to 64 tracks. Tracks after that are kept in the project but not played.",
+        ));
     }
 }
 
@@ -716,6 +954,8 @@ mod tests {
                 s.bottom == Bottom::Mixer,
                 (s.file_cmd, s.chooser.is_some(), s.undo_cmd),
                 (s.ui_scale, s.tracks.bar_w, s.tracks.selected),
+                (s.tracks.show_tempo, s.tracks.show_markers),
+                (i18n::chosen(), i18n::current()),
             )
         )
     }
@@ -744,7 +984,7 @@ mod tests {
             ("Save A Copy As…", FileCmd::SaveCopy),
             ("Revert to Saved", FileCmd::Revert),
         ] {
-            assert!(FILE.contains(&label), "{label} is in the File menu");
+            assert!(all_entries().contains(&label), "{label} is in the menus");
             apply(label, &mut Project::demo(), &mut s);
             assert_eq!(s.file_cmd.take(), Some(cmd));
         }
@@ -758,22 +998,26 @@ mod tests {
         s.can_undo = true;
         s.can_redo = true;
         s.tracks.selected = Some((0, 0));
-        for (_, items) in MENUS {
-            for label in items.iter().filter(|l| **l != "-" && **l != "Open Recent") {
-                if !enabled(label, &p, &s) {
-                    continue;
-                }
-                let (mut p2, mut s2) = (Project::demo(), crate::UiState::new());
-                s2.tracks.selected = Some((0, 0));
-                let before = state(&p2, &s2);
-                apply(label, &mut p2, &mut s2);
-                // These two may already be where they would take you.
-                let may_stay = ["Go to Next Region", "Actual Interface Size"].contains(label);
-                assert!(
-                    before != state(&p2, &s2) || may_stay,
-                    "{label} is enabled but does nothing"
-                );
+        for label in all_entries() {
+            if !enabled(label, &p, &s) {
+                continue;
             }
+            let (mut p2, mut s2) = (Project::demo(), crate::UiState::new());
+            s2.tracks.selected = Some((0, 0));
+            let before = state(&p2, &s2);
+            apply(label, &mut p2, &mut s2);
+            // These two may already be where they would take you.
+            // These may already be where they would take you.
+            let may_stay = [
+                "Go to Next Region",
+                "Actual Interface Size",
+                "English (Default)",
+            ]
+            .contains(&label);
+            assert!(
+                before != state(&p2, &s2) || may_stay,
+                "{label} is enabled but does nothing"
+            );
         }
         // And unimplemented ones are greyed, like the ones from the GitHub report.
         for label in [
@@ -861,10 +1105,69 @@ mod tests {
     #[test]
     fn recent_projects_are_listed_with_their_folder() {
         let label = recent_label(std::path::Path::new("/home/me/Music/Night Drive.prowave"));
-        assert_eq!(label, "    Night Drive  (Music)");
-        assert_eq!(
-            recent_label(std::path::Path::new("Solo.prowave")),
-            "    Solo"
+        assert_eq!(label, "Night Drive  (Music)");
+        assert_eq!(recent_label(std::path::Path::new("Solo.prowave")), "Solo");
+    }
+
+    #[test]
+    fn the_file_menu_follows_logic_with_submenus() {
+        for title in ["Revert to", "Import", "Export", "Bounce", "Share"] {
+            assert!(FILE.contains(&title), "{title}");
+            assert!(submenu(title).is_some(), "{title} opens a submenu");
+        }
+        // Every submenu is reachable from a menu.
+        for (title, _) in SUBMENUS {
+            assert!(
+                MENUS.iter().any(|(_, items)| items.contains(title)),
+                "{title}"
+            );
+        }
+        // Revert to > Revert to Saved is enabled, so its submenu opens.
+        let (p, s) = (Project::demo(), crate::UiState::new());
+        assert!(submenu("Revert to")
+            .unwrap()
+            .iter()
+            .any(|c| enabled(c, &p, &s)));
+    }
+
+    #[test]
+    fn markers_are_created_at_the_nearest_bar_and_navigated() {
+        let (mut p, mut s) = (Project::empty(), crate::UiState::new());
+        assert!(!enabled("Go to Next Marker", &p, &s));
+        p.position_beats = 5.0;
+        apply("Create Marker", &mut p, &mut s);
+        assert_eq!(p.markers[0].beat, 4.0, "bar 2 in 4/4");
+        assert!(s.tracks.show_markers, "the Marker track opens to show it");
+        p.position_beats = 15.0;
+        apply("Create Marker", &mut p, &mut s);
+        p.position_beats = 0.0;
+        apply("Go to Next Marker", &mut p, &mut s);
+        apply("Go to Next Marker", &mut p, &mut s);
+        assert_eq!(p.position_beats, 16.0);
+        apply("Go to Previous Marker", &mut p, &mut s);
+        assert_eq!(p.position_beats, 4.0);
+        apply("Delete Marker", &mut p, &mut s);
+        assert_eq!(p.markers.len(), 1);
+        assert_eq!(p.markers[0].beat, 16.0);
+    }
+
+    #[test]
+    fn help_language_lists_every_language_by_its_own_name() {
+        let all: Vec<&str> = Lang::ALL.iter().map(|l| l.native_name()).collect();
+        assert_eq!(LANGUAGE, all.as_slice());
+        assert!(HELP.contains(&"Language") && submenu("Language").is_some());
+
+        let (mut p, mut s) = (Project::demo(), crate::UiState::new());
+        assert!(
+            checked("English (Default)", &s),
+            "English until another is picked"
         );
+        apply("Deutsch", &mut p, &mut s);
+        assert_eq!(i18n::current(), Lang::De);
+        assert_eq!(i18n::chosen(), Some(Lang::De), "saved for the next start");
+        assert!(checked("Deutsch", &s) && !checked("English (Default)", &s));
+        assert_eq!(tr("Language"), "Sprache", "the menus switch at once");
+        apply("English (Default)", &mut p, &mut s);
+        assert!(checked("English (Default)", &s));
     }
 }

@@ -7,6 +7,7 @@
 //! Plug-in slots, sends and groups are drawn but not functional yet.
 //!
 //! [`channel_strip`] is also used by the Inspector's two strips.
+use crate::i18n::{tr, trf};
 use crate::model::{Project, TrackKind};
 use crate::widgets::{
     back_chevron, menu_title, popup_button, stroke, todo_item, BLUE, TEXT, TEXT_DIM,
@@ -38,7 +39,7 @@ const MASTER_PINK: Color32 = Color32::from_rgb(0xb0, 0x3c, 0x9a);
 const SCALE: [f32; 11] = [
     6.0, 3.0, 0.0, -3.0, -6.0, -10.0, -15.0, -20.0, -30.0, -40.0, -60.0,
 ];
-const FILTERS: [&str; 8] = [
+pub(crate) const FILTERS: [&str; 8] = [
     "Audio",
     "Inst",
     "Aux",
@@ -539,7 +540,7 @@ fn send_slot(ui: &Ui, g: &Painter, r: Rect, send: &mut crate::model::SendSlot, u
         egui::Popup::menu(&resp).show(|ui| {
             ui.set_min_width(110.0);
             for b in 1..=8u8 {
-                if ui.button(format!("Bus {b}")).clicked() {
+                if ui.button(trf("Bus {}", &[&b])).clicked() {
                     send.bus = Some(b);
                     ui.close();
                 }
@@ -553,7 +554,7 @@ fn send_slot(ui: &Ui, g: &Painter, r: Rect, send: &mut crate::model::SendSlot, u
     slot(
         g,
         slot_r,
-        &format!("Bus {bus}"),
+        &trf("Bus {}", &[&bus]),
         PLUGIN_BLUE,
         Color32::WHITE,
     );
@@ -567,7 +568,7 @@ fn send_slot(ui: &Ui, g: &Painter, r: Rect, send: &mut crate::model::SendSlot, u
         ui.set_min_width(130.0);
         for b in 1..=8u8 {
             if ui
-                .selectable_label(send.bus == Some(b), format!("Bus {b}"))
+                .selectable_label(send.bus == Some(b), trf("Bus {}", &[&b]))
                 .clicked()
             {
                 send.bus = Some(b);
@@ -575,11 +576,11 @@ fn send_slot(ui: &Ui, g: &Painter, r: Rect, send: &mut crate::model::SendSlot, u
             }
         }
         ui.separator();
-        if ui.selectable_label(send.pre, "Pre Fader").clicked() {
+        if ui.selectable_label(send.pre, tr("Pre Fader")).clicked() {
             send.pre = !send.pre;
             ui.close();
         }
-        if ui.button("No Send").clicked() {
+        if ui.button(tr("No Send")).clicked() {
             send.bus = None;
             ui.close();
         }
@@ -664,16 +665,16 @@ pub fn channel_strip(
             )
         }
         StripKey::StereoOut => (
-            "Stereo Out".to_string(),
+            tr("Stereo Out").to_string(),
             OUT_PURPLE,
             vec!["Compressor", "MultiMeter"],
             None,
             None,
         ),
-        StripKey::Master => ("Master".to_string(), MASTER_PINK, vec![], None, None),
+        StripKey::Master => (tr("Master").to_string(), MASTER_PINK, vec![], None, None),
     };
 
-    slot(g, row(r.setting, 16.0), "Setting", SLOT_GRAY, TEXT);
+    slot(g, row(r.setting, 16.0), tr("Setting"), SLOT_GRAY, TEXT);
     g.rect_filled(row(r.gain_red + 1.0, 6.0), 1.0, SLOT_EMPTY);
     eq_thumb(g, row(r.eq, 24.0), inserts.iter().any(|x| x.contains("EQ")));
     let input_r = row(r.input, 16.0);
@@ -691,10 +692,16 @@ pub fn channel_strip(
                     .count(),
                 _ => 1,
             };
-            slot(g, input_r, &format!("Bus {n}"), PLUGIN_BLUE, Color32::WHITE);
+            slot(
+                g,
+                input_r,
+                &trf("Bus {}", &[&n]),
+                PLUGIN_BLUE,
+                Color32::WHITE,
+            );
         }
         (Some(TrackKind::Audio), _) => {
-            slot(g, input_r, "Input 1", SLOT_GRAY, TEXT);
+            slot(g, input_r, &trf("Input {}", &[&1]), SLOT_GRAY, TEXT);
             g.circle_stroke(
                 pos2(input_r.left() + 8.0, input_r.center().y),
                 3.5,
@@ -724,9 +731,9 @@ pub fn channel_strip(
     }
     if let StripKey::Track(_) = key {
         let out = if name_style == NameStyle::Plain {
-            "Stereo Out"
+            tr("Stereo Out")
         } else {
-            "St Out"
+            tr("St Out")
         };
         slot(g, row(r.output, 16.0), out, SLOT_GRAY, TEXT);
         slot(g, row(r.group, 16.0), "", SLOT_EMPTY, TEXT);
@@ -736,7 +743,7 @@ pub fn channel_strip(
         slot(
             g,
             rr,
-            "Read",
+            tr("Read"),
             SLOT_EMPTY,
             Color32::from_rgb(0xa8, 0x9c, 0xf2),
         );
@@ -747,7 +754,13 @@ pub fn channel_strip(
             StrokeKind::Inside,
         );
     } else {
-        slot(g, row(r.automation, 16.0), "Read", SLOT_EMPTY, READ_GREEN);
+        slot(
+            g,
+            row(r.automation, 16.0),
+            tr("Read"),
+            SLOT_EMPTY,
+            READ_GREEN,
+        );
     }
 
     let pan_c = pos2(strip.center().x, r.pan + 12.0);
@@ -843,7 +856,7 @@ pub fn channel_strip(
         _ => {
             slot(g, m_r, "M", SLOT_GRAY, TEXT_DIM);
             if key == StripKey::StereoOut {
-                slot(g, s_r, "Bnc", SLOT_GRAY, TEXT_DIM);
+                slot(g, s_r, tr("Bnc"), SLOT_GRAY, TEXT_DIM);
             }
         }
     }
@@ -900,15 +913,15 @@ fn toolbar(ui: &Ui, s: &mut UiState, bar: Rect) {
     let v = &mut s.mixer;
 
     let mut x = bar.left() + 32.0;
-    let (edit, w) = menu_title(ui, &g, x, cy, "Edit", id(NS, "Edit"));
+    let (edit, w) = menu_title(ui, &g, x, cy, tr("Edit"), id(NS, "Edit"));
     x += w + 2.0;
     egui::Popup::menu(&edit).show(|ui| {
         ui.set_min_width(220.0);
         crate::widgets::undo_items(ui, can_undo, can_redo, &mut undo_pick);
         for item in [
-            "Copy Channel Strip",
-            "Paste Channel Strip",
-            "Select Audio Channel Strips",
+            tr("Copy Channel Strip"),
+            tr("Paste Channel Strip"),
+            tr("Select Audio Channel Strips"),
         ] {
             todo_item(ui, item);
         }
@@ -916,28 +929,31 @@ fn toolbar(ui: &Ui, s: &mut UiState, bar: Rect) {
     if undo_pick.is_some() {
         s.undo_cmd = undo_pick;
     }
-    let (options, w) = menu_title(ui, &g, x, cy, "Options", id(NS, "Options"));
+    let (options, w) = menu_title(ui, &g, x, cy, tr("Options"), id(NS, "Options"));
     x += w + 2.0;
     egui::Popup::menu(&options).show(|ui| {
         ui.set_min_width(220.0);
         for item in [
-            "Create New Auxiliary Channel Strip",
-            "Create New Output Channel Strip",
-            "Create New VCA",
-            "Create Group…",
+            tr("Create New Auxiliary Channel Strip"),
+            tr("Create New Output Channel Strip"),
+            tr("Create New VCA"),
+            tr("Create Group…"),
         ] {
             todo_item(ui, item);
         }
     });
-    let (view, w) = menu_title(ui, &g, x, cy, "View", id(NS, "View"));
+    let (view, w) = menu_title(ui, &g, x, cy, tr("View"), id(NS, "View"));
     x += w + 12.0;
     egui::Popup::menu(&view).show(|ui| {
         ui.set_min_width(220.0);
-        if ui.selectable_label(v.wide, "Wide Channel Strips").clicked() {
+        if ui
+            .selectable_label(v.wide, tr("Wide Channel Strips"))
+            .clicked()
+        {
             v.wide = !v.wide;
             ui.close();
         }
-        todo_item(ui, "Show Signal Flow Channel Strips");
+        todo_item(ui, tr("Show Signal Flow Channel Strips"));
     });
 
     let menus_end = x;
@@ -968,7 +984,7 @@ fn toolbar(ui: &Ui, s: &mut UiState, bar: Rect) {
     let filter_widths: Vec<f32> = FILTERS
         .iter()
         .map(|label| {
-            g.layout_no_wrap((*label).into(), FontId::proportional(12.5), TEXT)
+            g.layout_no_wrap(tr(label).into(), FontId::proportional(12.5), TEXT)
                 .size()
                 .x
                 + 16.0
@@ -987,7 +1003,7 @@ fn toolbar(ui: &Ui, s: &mut UiState, bar: Rect) {
             g.text(
                 r.center(),
                 Align2::CENTER_CENTER,
-                *label,
+                tr(label),
                 FontId::proportional(12.5),
                 if on { Color32::WHITE } else { TEXT_DIM },
             );
@@ -1002,11 +1018,11 @@ fn toolbar(ui: &Ui, s: &mut UiState, bar: Rect) {
             pos2(rx - FILTER_MENU_W, cy - 10.0),
             vec2(FILTER_MENU_W, 20.0),
         );
-        let resp = popup_button(ui, &g, r, id(NS, "filters_menu"), "Show");
+        let resp = popup_button(ui, &g, r, id(NS, "filters_menu"), tr("Show"));
         egui::Popup::menu(&resp).show(|ui| {
             ui.set_min_width(160.0);
             for (i, label) in FILTERS.iter().enumerate() {
-                if ui.checkbox(&mut v.filters[i], *label).clicked() {
+                if ui.checkbox(&mut v.filters[i], tr(label)).clicked() {
                     ui.close();
                 }
             }
@@ -1020,9 +1036,9 @@ fn toolbar(ui: &Ui, s: &mut UiState, bar: Rect) {
 
     // Single | Tracks | All
     let modes = [
-        (MixerMode::Single, "Single"),
-        (MixerMode::Tracks, "Tracks"),
-        (MixerMode::All, "All"),
+        (MixerMode::Single, tr("Single")),
+        (MixerMode::Tracks, tr("Tracks")),
+        (MixerMode::All, tr("All")),
     ];
     let seg_w = MODE_W / 3.0;
     for (i, (m, label)) in modes.iter().enumerate() {
@@ -1095,7 +1111,7 @@ fn draw_sends_on_faders(ui: &Ui, g: &egui::Painter, x: f32, cy: f32) {
     g.text(
         pos2(x, cy),
         Align2::LEFT_CENTER,
-        "Sends on Faders:",
+        tr("Sends on Faders:"),
         FontId::proportional(12.5),
         TEXT_DIM,
     );
@@ -1110,10 +1126,10 @@ fn draw_sends_on_faders(ui: &Ui, g: &egui::Painter, x: f32, cy: f32) {
         stroke(TEXT_DIM),
     );
     let sof = Rect::from_min_size(pos2(x + 126.0, cy - 10.0), vec2(110.0, 20.0));
-    let resp = popup_button(ui, g, sof, id(NS, "sends_on_faders"), "Off");
+    let resp = popup_button(ui, g, sof, id(NS, "sends_on_faders"), tr("Off"));
     egui::Popup::menu(&resp).show(|ui| {
-        let _ = ui.selectable_label(true, "Off");
-        todo_item(ui, "Bus 1");
+        let _ = ui.selectable_label(true, tr("Off"));
+        todo_item(ui, &trf("Bus {}", &[&1]));
     });
 }
 
@@ -1190,16 +1206,16 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
             TEXT_DIM,
         );
     };
-    label_at(r.setting, 16.0, "Setting");
-    label_at(r.gain_red, 8.0, "Gain Reduction");
+    label_at(r.setting, 16.0, tr("Setting"));
+    label_at(r.gain_red, 8.0, tr("Gain Reduction"));
     label_at(r.eq, 24.0, "EQ");
-    label_at(r.input, 16.0, "Input");
-    label_at(r.fx, 15.0, "Audio FX");
-    label_at(r.sends, 16.0, "Sends");
-    label_at(r.output, 16.0, "Output");
-    label_at(r.group, 16.0, "Group");
-    label_at(r.automation, 16.0, "Automation");
-    label_at(r.pan, 24.0, "Pan");
+    label_at(r.input, 16.0, tr("Input"));
+    label_at(r.fx, 15.0, tr("Audio FX"));
+    label_at(r.sends, 16.0, tr("Sends"));
+    label_at(r.output, 16.0, tr("Output"));
+    label_at(r.group, 16.0, tr("Group"));
+    label_at(r.automation, 16.0, tr("Automation"));
+    label_at(r.pan, 24.0, tr("Pan"));
     label_at(r.db, 14.0, "dB");
 
     let gs = ui.painter_at(strips_area);

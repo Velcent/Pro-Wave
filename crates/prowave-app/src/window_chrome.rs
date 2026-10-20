@@ -5,6 +5,7 @@
 //! maximizes, and the window's edges resize it.
 //!
 //! macOS keeps its own window buttons and the menu bar at the top of the screen.
+use crate::i18n::tr;
 use egui::viewport::ResizeDirection;
 use egui::{pos2, vec2, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, ViewportCommand};
 
@@ -80,10 +81,10 @@ enum Button {
 impl Button {
     fn label(self, maximized: bool) -> &'static str {
         match self {
-            Button::Minimize => "Minimize",
-            Button::Maximize if maximized => "Restore",
-            Button::Maximize => "Maximize",
-            Button::Close => "Close",
+            Button::Minimize => tr("Minimize"),
+            Button::Maximize if maximized => tr("Restore"),
+            Button::Maximize => tr("Maximize"),
+            Button::Close => tr("Close"),
         }
     }
 

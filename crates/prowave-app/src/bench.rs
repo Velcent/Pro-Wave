@@ -115,7 +115,7 @@ pub struct Render {
 /// Plays `p` from the start for `secs` through the engine, offline (no sound card), with each
 /// track's Library patch, the way the app sends them.
 pub fn render(p: &Project, secs: f64) -> Render {
-    use prowave_engine::{Command, EngineCore, Shared, TempoMap};
+    use prowave_engine::{Command, EngineCore, Shared};
     use std::sync::Arc;
 
     let (mut tx, rx) = rtrb::RingBuffer::<Command>::new(1024);
@@ -124,7 +124,7 @@ pub fn render(p: &Project, secs: f64) -> Render {
     let mut core = EngineCore::new(SAMPLE_RATE, rx, trash_tx, shared.clone());
     let mut commands = vec![
         Command::SetSong(Box::new(crate::engine_sync::offline_song(p))),
-        Command::SetTempoMap(Box::new(TempoMap::constant(p.tempo, p.sig))),
+        Command::SetTempoMap(Box::new(p.tempo_map())),
         Command::SetCycle {
             on: true,
             start_beat: 0.0,

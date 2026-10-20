@@ -5,11 +5,15 @@
 //! where the disk-streaming engine reads them.
 use crate::import::audio_region;
 use crate::library::CATEGORIES;
-use crate::model::{Note, Project, Region, RegionParams, SendSlot, Track, TrackKind, TrackParams};
+use crate::model::{
+    Marker, Note, Project, Region, RegionParams, SendSlot, TempoPoint, Track, TrackKind,
+    TrackParams, MAX_REGION_GAIN, MIN_REGION_GAIN,
+};
 use egui::Color32;
-use prowave_engine::AudioFile;
+use prowave_engine::{AudioFile, FadeCurve};
 use prowave_project::{
-    media_path, MediaFile, NoteDoc, ProjectDoc, RegionDoc, TrackDoc, TrackKindDoc,
+    media_path, MarkerDoc, MediaFile, NoteDoc, ProjectDoc, RegionDoc, TempoChangeDoc, TrackDoc,
+    TrackKindDoc,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -190,6 +194,11 @@ pub fn to_doc(p: &Project) -> (ProjectDoc, Vec<MediaFile>) {
                     quantize: r.params.quantize,
                     transpose: r.params.transpose,
                     velocity: r.params.velocity,
+                    gain_db: r.params.gain_db,
+                    fade_in: r.params.fade_in,
+                    fade_out: r.params.fade_out,
+                    fade_curve: curve_name(r.params.fade_curve).into(),
+                    reverse: r.params.reverse,
                 })
                 .collect(),
         })
@@ -208,6 +217,23 @@ pub fn to_doc(p: &Project) -> (ProjectDoc, Vec<MediaFile>) {
         master_vol: p.master_vol,
         selected_track: p.selected_track,
         tracks,
+        tempo_changes: p
+            .tempo_changes
+            .iter()
+            .map(|t| TempoChangeDoc {
+                beat: t.beat,
+                bpm: t.bpm,
+            })
+            .collect(),
+        markers: p
+            .markers
+            .iter()
+            .map(|m| MarkerDoc {
+                beat: m.beat,
+                name: m.name.clone(),
+                color: [m.color.r(), m.color.g(), m.color.b()],
+            })
+            .collect(),
         ..ProjectDoc::default()
     };
     (doc, media)
@@ -265,6 +291,11 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
                     quantize: r.quantize.filter(|q| q.is_finite() && *q > 0.0),
                     transpose: r.transpose,
                     velocity: r.velocity,
+                    gain_db: finite_in(r.gain_db, MIN_REGION_GAIN, MAX_REGION_GAIN, 0.0),
+                    fade_in: finite_in(r.fade_in, 0.0, MAX_FADE, 0.0),
+                    fade_out: finite_in(r.fade_out, 0.0, MAX_FADE, 0.0),
+                    fade_curve: curve_from_name(&r.fade_curve),
+                    reverse: r.reverse,
                 },
             });
         }
@@ -301,6 +332,25 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
     let mut p = Project::empty();
     p.name = doc.name.clone();
     p.tempo = doc.tempo.clamp(5.0, 990.0);
+    p.tempo_changes = doc
+        .tempo_changes
+        .iter()
+        .map(|t| TempoPoint {
+            beat: t.beat,
+            bpm: t.bpm,
+        })
+        .collect();
+    p.tidy_tempo();
+    p.markers = doc
+        .markers
+        .iter()
+        .map(|m| Marker {
+            beat: m.beat,
+            name: m.name.chars().take(64).collect(),
+            color: Color32::from_rgb(m.color[0], m.color[1], m.color[2]),
+        })
+        .collect();
+    p.tidy_markers();
     p.sig = signature(doc.sig);
     p.key = intern(&doc.key);
     p.position_beats = doc.position_beats.max(0.0);
@@ -317,6 +367,25 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
     p.playing = false;
     p.recording = false;
     (p, warnings)
+}
+
+/// Longest fade a file may ask for, in beats.
+const MAX_FADE: f32 = 4096.0;
+
+fn curve_name(c: FadeCurve) -> &'static str {
+    match c {
+        FadeCurve::Linear => "linear",
+        FadeCurve::EqualPower => "equal_power",
+        FadeCurve::SCurve => "s_curve",
+    }
+}
+
+fn curve_from_name(name: &str) -> FadeCurve {
+    match name {
+        "linear" => FadeCurve::Linear,
+        "s_curve" => FadeCurve::SCurve,
+        _ => FadeCurve::EqualPower,
+    }
 }
 
 /// Root of all extracted project media.
@@ -420,13 +489,32 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn hand_edited_tempo_changes_are_sorted_and_cleaned() {
+        let mut doc = to_doc(&Project::empty()).0;
+        doc.tempo_changes = [(64.0, 90.0), (0.0, 50.0), (16.0, f32::NAN), (8.0, 2000.0)]
+            .into_iter()
+            .map(|(beat, bpm)| TempoChangeDoc { beat, bpm })
+            .collect();
+        let (p, _) = from_doc(&doc, Path::new("."), &egui::Context::default());
+        let got: Vec<(f64, f32)> = p.tempo_changes.iter().map(|t| (t.beat, t.bpm)).collect();
+        assert_eq!(got, vec![(8.0, 990.0), (64.0, 90.0)]);
+    }
+
+    #[test]
     fn save_and_open_round_trip_the_demo_with_edits() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let mut p = Project::demo();
         p.tempo = 101.0;
+        p.add_tempo_change(32.0, 140.0);
+        let m = p.add_marker(16.0);
+        p.markers[m].name = "Chorus".into();
         p.cycle = true;
         p.tracks[0].regions[0].params.transpose = 5;
+        p.tracks[4].regions[0].params.gain_db = -3.5;
+        p.tracks[4].regions[0].params.fade_in = 2.0;
+        p.tracks[4].regions[0].params.fade_curve = FadeCurve::SCurve;
+        p.tracks[4].regions[0].params.reverse = true;
         p.tracks[0].params.key_limit = (40, 90);
         p.tracks[1].category = Some("Piano");
         p.tracks[2].send.pre = true;
@@ -449,12 +537,18 @@ pub(crate) mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(q.name, "song");
         assert_eq!((q.tempo, q.cycle), (101.0, true));
+        assert_eq!(q.tempo_changes, p.tempo_changes, "the Tempo track is saved");
+        assert_eq!(q.markers, p.markers, "and the Marker track");
         assert_eq!(q.tracks.len(), p.tracks.len());
         assert_eq!(
             q.tracks[0].regions[0].notes.len(),
             p.tracks[0].regions[0].notes.len()
         );
         assert_eq!(q.tracks[0].regions[0].params.transpose, 5);
+        assert!(
+            q.tracks[4].regions[0].params == p.tracks[4].regions[0].params,
+            "region gain, fade and reverse are saved"
+        );
         assert_eq!(q.tracks[0].params.key_limit, (40, 90));
         assert_eq!(q.tracks[1].category, Some("Piano"));
         assert!(q.tracks[2].send.pre);

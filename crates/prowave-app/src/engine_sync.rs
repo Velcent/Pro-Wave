@@ -1,9 +1,7 @@
 //! Bridges the UI project model to `prowave-engine` using only `Command`s (never direct mutation).
-use crate::model::{Project, Region, Track};
+use crate::model::{Project, Region, TempoPoint, Track};
 use crate::patches::synth_patch;
-use prowave_engine::{
-    Command, Engine, NoteEvent, Song, SynthPatch, TempoMap, TrackMix, MAX_TRACKS,
-};
+use prowave_engine::{Command, Engine, NoteEvent, Song, SynthPatch, TrackMix, MAX_TRACKS};
 
 #[derive(Clone, Copy, PartialEq)]
 struct Mix {
@@ -19,8 +17,8 @@ struct Mix {
 pub struct EngineSync {
     pub engine: Engine,
     playing: bool,
-    /// Tempo and signature last sent (the project has one of each so far).
-    tempo: Option<(f32, (u8, u8))>,
+    /// Tempo, tempo changes and signature last sent.
+    tempo: Option<(f32, Vec<TempoPoint>, (u8, u8))>,
     metronome: bool,
     cycle: (bool, f64, f64),
     master: Option<f32>,
@@ -109,7 +107,7 @@ fn song_notes(p: &Project) -> Vec<NoteEvent> {
 #[derive(PartialEq, Default, Debug)]
 struct AudioLayout {
     tracks: usize,
-    clips: Vec<(std::path::PathBuf, u8, u64)>,
+    clips: Vec<(std::path::PathBuf, u8, u64, String)>,
 }
 
 fn audio_layout(p: &Project) -> AudioLayout {
@@ -118,17 +116,23 @@ fn audio_layout(p: &Project) -> AudioLayout {
         clips: playing_regions(p)
             .filter_map(|(track, _, r, origin)| {
                 let a = r.audio.as_ref()?;
-                Some((a.file.path.clone(), track, origin.to_bits()))
+                // Gain, fades and reverse are set when a clip starts streaming.
+                let edit = format!("{:?}", r.params.clip_edit());
+                Some((a.file.path.clone(), track, origin.to_bits(), edit))
             })
             .collect(),
     }
 }
 
 fn build_song(engine: &Engine, p: &Project) -> Song {
+    // Every clip reads ahead as much as the whole song's prefetch memory allows.
+    let streamed = playing_regions(p)
+        .filter(|(_, _, r, _)| r.audio.is_some())
+        .count();
     let clips = playing_regions(p)
         .filter_map(|(track, _, r, origin)| {
             let a = r.audio.as_ref()?;
-            Some(engine.stream_clip(&a.file, track, origin))
+            Some(engine.stream_clip_in(&a.file, track, origin, r.params.clip_edit(), streamed))
         })
         .collect();
     let notes = song_notes(p);
@@ -163,9 +167,13 @@ pub fn offline_song(p: &Project) -> Song {
     Song::new(song_notes(p), tracks)
 }
 
-/// The project's tempo and time signature as an engine tempo map.
+/// The project's Tempo track and time signature as an engine tempo map.
 fn tempo_map(p: &Project) -> Command {
-    Command::SetTempoMap(Box::new(TempoMap::constant(p.tempo, p.sig)))
+    Command::SetTempoMap(Box::new(p.tempo_map()))
+}
+
+fn tempo_key(p: &Project) -> (f32, Vec<TempoPoint>, (u8, u8)) {
+    (p.tempo, p.tempo_changes.clone(), p.sig)
 }
 
 impl EngineSync {
@@ -240,8 +248,9 @@ impl EngineSync {
         {
             self.playing = p.playing;
         }
-        if self.tempo != Some((p.tempo, p.sig)) && self.send(tempo_map(p)) {
-            self.tempo = Some((p.tempo, p.sig));
+        let key = tempo_key(p);
+        if self.tempo.as_ref() != Some(&key) && self.send(tempo_map(p)) {
+            self.tempo = Some(key);
         }
         if p.metronome != self.metronome && self.send(Command::SetMetronome { on: p.metronome }) {
             self.metronome = p.metronome;
@@ -352,6 +361,7 @@ impl EngineSync {
 mod tests {
     use super::*;
     use crate::model::{Note, RegionParams, TrackKind, TrackParams};
+    use prowave_engine::TempoMap;
 
     fn track(notes: Vec<Note>) -> Track {
         Track {
@@ -400,6 +410,7 @@ mod tests {
             quantize: Some(0.25),
             transpose: 12,
             velocity: -10,
+            ..RegionParams::default()
         };
         t.params.transpose = -2;
         let out = region_notes(&t, &t.regions[0], 4.0, 3);
@@ -543,6 +554,18 @@ mod tests {
         p.tracks[audio].regions[0].params.mute = true;
         assert_ne!(audio_layout(&p), before);
         p.tracks[audio].regions[0].params.mute = false;
+        // Nor do gain, fades or reverse, which a clip gets when it starts streaming.
+        for edit in [
+            |r: &mut RegionParams| r.gain_db = -6.0,
+            |r: &mut RegionParams| r.fade_out = 1.0,
+            |r: &mut RegionParams| r.reverse = true,
+        ] {
+            let mut q = Project::demo();
+            q.tracks = p.tracks.clone();
+            let before = audio_layout(&q);
+            edit(&mut q.tracks[audio].regions[0].params);
+            assert_ne!(audio_layout(&q), before);
+        }
         p.tracks.push(p.tracks[0].clone());
         assert_ne!(audio_layout(&p), before);
     }

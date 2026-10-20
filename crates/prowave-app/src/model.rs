@@ -56,6 +56,37 @@ pub struct RegionParams {
     pub transpose: i8,
     /// Added to every note velocity.
     pub velocity: i8,
+    /// Audio regions (Logic: Region Inspector Gain, Fade In / Out, Curve, Reverse), applied
+    /// non-destructively by the engine. Gain in dB; fades in quarter-note beats.
+    pub gain_db: f32,
+    pub fade_in: f32,
+    pub fade_out: f32,
+    pub fade_curve: prowave_engine::FadeCurve,
+    pub reverse: bool,
+}
+
+/// Logic Pro's region gain range, in dB.
+pub const MIN_REGION_GAIN: f32 = -96.0;
+pub const MAX_REGION_GAIN: f32 = 24.0;
+
+impl RegionParams {
+    /// The audio edits as the engine applies them.
+    pub fn clip_edit(&self) -> prowave_engine::ClipEdit {
+        prowave_engine::ClipEdit {
+            gain_db: self.gain_db,
+            fade_in_beats: self.fade_in as f64,
+            fade_out_beats: self.fade_out as f64,
+            fade_curve: self.fade_curve,
+            reverse: self.reverse,
+        }
+    }
+
+    /// Region gain that brings a file whose loudest sample is `peak` (0..1) to 0 dBFS
+    /// (Logic: Normalize Region Gain). `None` for a silent file.
+    pub fn normalize_gain(peak: f32) -> Option<f32> {
+        (peak.is_finite() && peak > 1e-6)
+            .then(|| (-20.0 * peak.log10()).clamp(MIN_REGION_GAIN, MAX_REGION_GAIN))
+    }
 }
 
 /// One send slot of a channel strip (Logic: "Bus 1" with a level knob). Not routed in the
@@ -167,10 +198,48 @@ impl Track {
     }
 }
 
+/// A tempo change on the Tempo track (Logic: a tempo point): `bpm` from `beat` (quarter notes
+/// from the start) until the next change.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct TempoPoint {
+    pub beat: f64,
+    pub bpm: f32,
+}
+
+/// A marker on the Marker track (Logic: Intro, Verse, Chorus...): from `beat` (quarter notes
+/// from the start) until the next marker.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Marker {
+    pub beat: f64,
+    pub name: String,
+    pub color: Color32,
+}
+
+/// Colours offered for markers, in the order new markers take them.
+pub const MARKER_COLORS: [Color32; 8] = [
+    Color32::from_rgb(0x3f, 0x8f, 0xd8),
+    Color32::from_rgb(0x4e, 0xb0, 0x4a),
+    Color32::from_rgb(0xd9, 0xaa, 0x2a),
+    Color32::from_rgb(0xd8, 0x6a, 0x2c),
+    Color32::from_rgb(0xc8, 0x3c, 0x3c),
+    Color32::from_rgb(0xb0, 0x4f, 0xb8),
+    Color32::from_rgb(0x7a, 0x4f, 0xc0),
+    Color32::from_rgb(0x3c, 0xa8, 0xa0),
+];
+
+/// Logic Pro's tempo range.
+pub const MIN_BPM: f32 = 5.0;
+pub const MAX_BPM: f32 = 990.0;
+
 #[derive(Clone)]
 pub struct Project {
     pub name: String,
+    /// Tempo at the start of the song (the first point of the Tempo track).
     pub tempo: f32,
+    /// Later tempo changes, sorted by beat, all after the start (see [`Project::tidy_tempo`]).
+    pub tempo_changes: Vec<TempoPoint>,
+    /// Marker track, sorted by beat (see [`Project::tidy_markers`]).
+    pub markers: Vec<Marker>,
     pub sig: (u8, u8),
     pub key: &'static str,
     pub tracks: Vec<Track>,
@@ -371,7 +440,142 @@ impl Project {
             selected_track: 0,
             master_vol: 0.8,
             song_rev: 0,
+            tempo_changes: Vec::new(),
+            markers: Vec::new(),
         }
+    }
+
+    /// Adds a marker at `beat` named "Marker <n>" (or replaces the name of one already there).
+    /// Returns its index.
+    pub fn add_marker(&mut self, beat: f64) -> usize {
+        let beat = beat.max(0.0);
+        if let Some(i) = self
+            .markers
+            .iter()
+            .position(|m| (m.beat - beat).abs() <= 1e-6)
+        {
+            return i;
+        }
+        let n = (1..)
+            .find(|n| !self.markers.iter().any(|m| m.name == format!("Marker {n}")))
+            .unwrap_or(1);
+        let i = self.markers.partition_point(|m| m.beat < beat);
+        let color = MARKER_COLORS[self.markers.len() % MARKER_COLORS.len()];
+        self.markers.insert(
+            i,
+            Marker {
+                beat,
+                name: format!("Marker {n}"),
+                color,
+            },
+        );
+        i
+    }
+
+    /// The marker the playhead at `beat` is in (the last one at or before it).
+    pub fn marker_at(&self, beat: f64) -> Option<usize> {
+        let n = self.markers.partition_point(|m| m.beat <= beat + 1e-6);
+        n.checked_sub(1)
+    }
+
+    /// Start of the first marker after `beat`.
+    pub fn next_marker(&self, beat: f64) -> Option<f64> {
+        self.markers
+            .iter()
+            .map(|m| m.beat)
+            .find(|b| *b > beat + 1e-6)
+    }
+
+    /// Start of the last marker before `beat`.
+    pub fn previous_marker(&self, beat: f64) -> Option<f64> {
+        self.markers
+            .iter()
+            .rev()
+            .map(|m| m.beat)
+            .find(|b| *b < beat - 1e-6)
+    }
+
+    /// Sorts the markers and drops invalid ones (negative or non-finite positions, a second
+    /// marker on the same beat).
+    pub fn tidy_markers(&mut self) {
+        self.markers.retain(|m| m.beat.is_finite() && m.beat >= 0.0);
+        self.markers.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        self.markers
+            .dedup_by(|b, a| (a.beat - b.beat).abs() <= 1e-6);
+    }
+
+    /// The tempo in effect at `beat`.
+    pub fn tempo_at(&self, beat: f64) -> f32 {
+        self.tempo_changes
+            .iter()
+            .take_while(|t| t.beat <= beat)
+            .last()
+            .map_or(self.tempo, |t| t.bpm)
+    }
+
+    /// Sets the tempo in effect at `beat` (the change before it, or the start tempo), as
+    /// dragging the tempo in the control bar does in Logic.
+    pub fn set_tempo_at(&mut self, beat: f64, bpm: f32) {
+        let bpm = bpm.clamp(MIN_BPM, MAX_BPM);
+        match self.tempo_changes.iter_mut().rev().find(|t| t.beat <= beat) {
+            Some(t) => t.bpm = bpm,
+            None => self.tempo = bpm,
+        }
+    }
+
+    /// Adds a tempo change at `beat` (replacing one already there). Returns its index.
+    pub fn add_tempo_change(&mut self, beat: f64, bpm: f32) -> usize {
+        let beat = beat.max(0.0);
+        let bpm = bpm.clamp(MIN_BPM, MAX_BPM);
+        if beat <= 0.0 {
+            self.tempo = bpm;
+            return usize::MAX;
+        }
+        self.tempo_changes.retain(|t| (t.beat - beat).abs() > 1e-6);
+        let i = self.tempo_changes.partition_point(|t| t.beat < beat);
+        self.tempo_changes.insert(i, TempoPoint { beat, bpm });
+        i
+    }
+
+    /// Sorts the tempo changes and drops invalid ones: at or before the start, duplicates of a
+    /// beat (the last one wins) and non-finite values.
+    pub fn tidy_tempo(&mut self) {
+        self.tempo_changes
+            .retain(|t| t.beat.is_finite() && t.beat > 1e-6 && t.bpm.is_finite());
+        for t in &mut self.tempo_changes {
+            t.bpm = t.bpm.clamp(MIN_BPM, MAX_BPM);
+        }
+        self.tempo_changes.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        let mut out: Vec<TempoPoint> = Vec::with_capacity(self.tempo_changes.len());
+        for t in self.tempo_changes.drain(..) {
+            match out.last_mut() {
+                Some(last) if (last.beat - t.beat).abs() <= 1e-6 => *last = t,
+                _ => out.push(t),
+            }
+        }
+        self.tempo_changes = out;
+    }
+
+    /// The tempo and signature as the engine's tempo map.
+    pub fn tempo_map(&self) -> prowave_engine::TempoMap {
+        use prowave_engine::{SignatureEvent, TempoCurve, TempoEvent};
+        let tempos = std::iter::once(TempoEvent {
+            beat: 0.0,
+            bpm: self.tempo,
+            curve: TempoCurve::Step,
+        })
+        .chain(self.tempo_changes.iter().map(|t| TempoEvent {
+            beat: t.beat,
+            bpm: t.bpm,
+            curve: TempoCurve::Step,
+        }))
+        .collect();
+        let sigs = vec![SignatureEvent {
+            bar: 0,
+            num: self.sig.0,
+            den: self.sig.1,
+        }];
+        prowave_engine::TempoMap::new(tempos, sigs)
     }
 
     /// Length of one signature beat in quarter notes: 1 for x/4, 0.5 for x/8, 2 for x/2.
@@ -854,5 +1058,101 @@ mod tests {
         p.sig = (4, 3);
         assert!(p.step_signature(SigPart::Denominator, 1));
         assert_eq!(p.sig.1, 8);
+    }
+
+    #[test]
+    fn tempo_changes_hold_until_the_next_one() {
+        let mut p = Project::empty();
+        p.tempo = 120.0;
+        p.add_tempo_change(16.0, 90.0);
+        p.add_tempo_change(8.0, 100.0);
+        assert_eq!(p.tempo_at(0.0), 120.0);
+        assert_eq!(p.tempo_at(8.0), 100.0);
+        assert_eq!(p.tempo_at(15.9), 100.0);
+        assert_eq!(p.tempo_at(400.0), 90.0);
+        // Adding at the same beat replaces; at the start sets the start tempo.
+        p.add_tempo_change(8.0, 110.0);
+        assert_eq!(p.tempo_changes.len(), 2);
+        p.add_tempo_change(0.0, 60.0);
+        assert_eq!((p.tempo, p.tempo_changes.len()), (60.0, 2));
+        // Dragging the LCD tempo edits the change in effect at the playhead.
+        p.set_tempo_at(20.0, 95.0);
+        assert_eq!(p.tempo_changes[1].bpm, 95.0);
+        p.set_tempo_at(3.0, 70.0);
+        assert_eq!(p.tempo, 70.0);
+    }
+
+    #[test]
+    fn the_engine_tempo_map_follows_the_tempo_track() {
+        let mut p = Project::empty();
+        p.tempo = 120.0;
+        p.add_tempo_change(8.0, 60.0);
+        let map = p.tempo_map();
+        // 8 beats at 120 = 4 s, then 4 beats at 60 = 4 s.
+        assert!((map.seconds_at(8.0) - 4.0).abs() < 1e-9);
+        assert!((map.seconds_at(12.0) - 8.0).abs() < 1e-9);
+        assert_eq!(map.tempo_at(10.0), 60.0);
+    }
+
+    #[test]
+    fn markers_are_named_kept_in_order_and_navigable() {
+        let mut p = Project::empty();
+        assert_eq!(p.add_marker(16.0), 0);
+        assert_eq!(p.add_marker(4.0), 0, "sorted by position");
+        assert_eq!(p.add_marker(16.0), 1, "one marker per position");
+        let names: Vec<&str> = p.markers.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["Marker 2", "Marker 1"]);
+        assert_ne!(p.markers[0].color, p.markers[1].color);
+        assert_eq!(p.marker_at(2.0), None);
+        assert_eq!(p.marker_at(4.0), Some(0));
+        assert_eq!(p.marker_at(30.0), Some(1));
+        assert_eq!(p.next_marker(4.0), Some(16.0));
+        assert_eq!(p.next_marker(16.0), None);
+        assert_eq!(p.previous_marker(16.0), Some(4.0));
+        assert_eq!(p.previous_marker(4.0), None);
+        // A deleted name is reused.
+        p.markers.remove(1);
+        p.add_marker(32.0);
+        assert_eq!(p.markers[1].name, "Marker 1");
+    }
+
+    #[test]
+    fn tidy_markers_sorts_and_drops_bad_or_doubled_ones() {
+        let mut p = Project::empty();
+        for b in [8.0, -1.0, f64::NAN, 2.0, 8.0] {
+            p.markers.push(Marker {
+                beat: b,
+                name: format!("{b}"),
+                color: MARKER_COLORS[0],
+            });
+        }
+        p.tidy_markers();
+        let beats: Vec<f64> = p.markers.iter().map(|m| m.beat).collect();
+        assert_eq!(beats, [2.0, 8.0]);
+    }
+
+    #[test]
+    fn normalize_brings_the_peak_to_full_scale() {
+        let g = RegionParams::normalize_gain(0.5).unwrap();
+        assert!((g - 6.0206).abs() < 1e-3, "half scale needs +6 dB, got {g}");
+        assert_eq!(RegionParams::normalize_gain(1.0), Some(0.0));
+        assert_eq!(RegionParams::normalize_gain(0.0), None, "silence");
+        assert_eq!(RegionParams::normalize_gain(f32::NAN), None);
+        assert_eq!(
+            RegionParams::normalize_gain(1e-5),
+            Some(MAX_REGION_GAIN),
+            "never past +24 dB"
+        );
+        let edit = RegionParams {
+            gain_db: -2.0,
+            fade_in: 1.5,
+            reverse: true,
+            ..RegionParams::default()
+        }
+        .clip_edit();
+        assert_eq!(
+            (edit.gain_db, edit.fade_in_beats, edit.reverse),
+            (-2.0, 1.5, true)
+        );
     }
 }

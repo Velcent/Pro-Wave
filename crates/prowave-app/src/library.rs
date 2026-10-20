@@ -6,6 +6,7 @@
 //! instrument slot and Audio FX chain change, and the icon follows the category. Revert
 //! restores what the track had before. The built-in engine has a single synth voice, so a
 //! patch does not change the sound yet. Patch names are ProWave's own.
+use crate::i18n::tr;
 use crate::model::{Project, TrackKind};
 use crate::track_icons::{draw_icon, track_icon};
 use crate::widgets::{stroke, BTN_BG, TEXT, TEXT_DIM};
@@ -454,14 +455,14 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let lib = g.text(
         pos2(panel.center().x - 6.0, hy),
         Align2::RIGHT_CENTER,
-        "Library",
+        tr("Library"),
         FontId::proportional(13.0),
         TEXT,
     );
     let all = g.text(
         pos2(panel.center().x + 2.0, hy),
         Align2::LEFT_CENTER,
-        "All Sounds",
+        tr("All Sounds"),
         FontId::proportional(12.5),
         TEXT_DIM,
     );
@@ -509,7 +510,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     ui.put(
         edit_r,
         egui::TextEdit::singleline(&mut v.search)
-            .hint_text("Search Sounds")
+            .hint_text(tr("Search Sounds"))
             .frame(egui::Frame::NONE)
             .text_color(TEXT)
             .font(FontId::proportional(12.5)),
@@ -548,7 +549,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             g.text(
                 pos2(cols.center().x, cols.top() + 20.0),
                 Align2::CENTER_CENTER,
-                "No results",
+                tr("No results"),
                 FontId::proportional(12.0),
                 TEXT_DIM,
             );
@@ -560,7 +561,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             panel.right()
         };
         let left_col = Rect::from_min_max(cols.min, pos2(split, cols.bottom()));
-        let cat_items: Vec<String> = CATEGORIES.iter().map(|c| c.name.to_string()).collect();
+        let cat_items: Vec<String> = CATEGORIES.iter().map(|c| tr(c.name).to_string()).collect();
         if let Some(i) = column(
             ui,
             &g,
@@ -614,7 +615,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         &g,
         Rect::from_min_size(pos2(left + 8.0, fy), vec2(bw, 22.0)),
         "revert",
-        "Revert",
+        tr("Revert"),
         can_revert,
     ) {
         revert(p, v);
@@ -624,7 +625,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         &g,
         Rect::from_min_size(pos2(left + 16.0 + bw, fy), vec2(bw, 22.0)),
         "delete",
-        "Delete",
+        tr("Delete"),
         false,
     );
     footer_button(
@@ -632,7 +633,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         &g,
         Rect::from_min_size(pos2(left + 24.0 + 2.0 * bw, fy), vec2(bw, 22.0)),
         "save",
-        "Save…",
+        tr("Save…"),
         false,
     );
 }
