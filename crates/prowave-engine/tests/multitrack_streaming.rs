@@ -14,8 +14,8 @@ static ALLOC_GUARD: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisab
 const RATE: u32 = 48_000;
 const TRACKS: usize = 24;
 const BLOCK: usize = 256;
-const PLAY_FRAMES: usize = RATE as usize * 5;
-const FILE_FRAMES: usize = RATE as usize * 6;
+const PLAY_FRAMES: usize = RATE as usize * 60;
+const FILE_FRAMES: usize = RATE as usize * 61;
 const PCM_SCALE: f32 = 8_388_608.0;
 
 // Distinct integer waveforms per track allow a sample-by-sample reference mix, including
@@ -50,7 +50,7 @@ fn write_pcm24(path: &Path, track: usize) -> std::io::Result<()> {
 }
 
 #[test]
-#[ignore = "five seconds of wall-clock audio; run on an otherwise idle machine"]
+#[ignore = "60 seconds of wall-clock audio; run on an otherwise idle machine"]
 fn streams_24_pcm24_tracks_without_dropouts() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let disk = DiskThread::spawn();
@@ -120,6 +120,6 @@ fn streams_24_pcm24_tracks_without_dropouts() -> Result<(), Box<dyn std::error::
         max_error < 0.000001,
         "missing, duplicated, or corrupted audio samples"
     );
-    assert!((shared.position() - 10.0).abs() < 1e-6);
+    assert!((shared.position() - 120.0).abs() < 1e-6);
     Ok(())
 }

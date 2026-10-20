@@ -10,6 +10,7 @@ const TARGET_MS: f64 = 20.0;
 
 fn main() {
     // `--buffer N` requests N frames per callback (default 128, like a typical DAW setting).
+    // `--asio` explicitly selects the Windows ASIO host when built with `--features asio`.
     let args: Vec<String> = std::env::args().collect();
     let buffer = args
         .iter()
@@ -17,8 +18,22 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|v| v.parse().ok())
         .unwrap_or(128u32);
+    let use_asio = args.iter().any(|arg| arg == "--asio");
     println!("requested:   {buffer} frames");
-    let mut engine = match Engine::start_with(Some(buffer)) {
+    let engine_result = if use_asio {
+        #[cfg(all(windows, feature = "asio"))]
+        {
+            Engine::start_asio_with(Some(buffer))
+        }
+        #[cfg(not(all(windows, feature = "asio")))]
+        {
+            eprintln!("--asio requires a Windows build with --features asio");
+            std::process::exit(2);
+        }
+    } else {
+        Engine::start_with(Some(buffer))
+    };
+    let mut engine = match engine_result {
         Ok(e) => e,
         Err(err) => {
             eprintln!("beep: {err}");
@@ -51,7 +66,7 @@ fn main() {
         eprintln!("FAIL: output latency {out_ms:.2} ms > {TARGET_MS} ms target");
         if cfg!(windows) {
             eprintln!("hint: WASAPI shared mode adds the Windows mixer's buffering; the roadmap");
-            eprintln!("      target on Windows is ASIO (cpal `asio` feature), not wired up yet.");
+            eprintln!("      try `--features asio -- --asio` with a native ASIO driver installed.");
         }
         std::process::exit(1);
     }

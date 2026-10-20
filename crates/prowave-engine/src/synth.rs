@@ -85,6 +85,41 @@ impl Default for SynthPatch {
     }
 }
 
+impl SynthPatch {
+    /// Bounds user/project parameters before they enter the real-time voice state.
+    pub(crate) fn sanitized(self) -> Self {
+        let d = Self::default();
+        let finite = |value: f32, fallback: f32, min: f32, max: f32| {
+            if value.is_finite() {
+                value.clamp(min, max)
+            } else {
+                fallback
+            }
+        };
+        Self {
+            level_a: finite(self.level_a, d.level_a, 0.0, 4.0),
+            level_b: finite(self.level_b, d.level_b, 0.0, 4.0),
+            semi_b: finite(self.semi_b, d.semi_b, -48.0, 48.0),
+            detune_b: finite(self.detune_b, d.detune_b, -100.0, 100.0),
+            pulse_width: finite(self.pulse_width, d.pulse_width, 0.05, 0.95),
+            noise: finite(self.noise, d.noise, 0.0, 1.0),
+            attack: finite(self.attack, d.attack, 0.001, 60.0),
+            decay: finite(self.decay, d.decay, 0.0, 60.0),
+            sustain: finite(self.sustain, d.sustain, 0.0, 1.0),
+            release: finite(self.release, d.release, 0.002, 60.0),
+            cutoff: finite(self.cutoff, d.cutoff, 20.0, 20_000.0),
+            resonance: finite(self.resonance, d.resonance, 0.0, 1.0),
+            filter_env: finite(self.filter_env, d.filter_env, 0.0, 1.5),
+            vibrato_hz: finite(self.vibrato_hz, d.vibrato_hz, 0.0, 20.0),
+            vibrato_cents: finite(self.vibrato_cents, d.vibrato_cents, 0.0, 100.0),
+            pitch_drop: finite(self.pitch_drop, d.pitch_drop, -48.0, 48.0),
+            pitch_decay: finite(self.pitch_decay, d.pitch_decay, 0.001, 60.0),
+            gain: finite(self.gain, d.gain, 0.0, 4.0),
+            ..self
+        }
+    }
+}
+
 fn poly_blep(t: f32, dt: f32) -> f32 {
     if t < dt {
         let x = t / dt;
@@ -126,7 +161,14 @@ pub struct Svf {
 impl Svf {
     /// Frequency coefficient for `cutoff`; costly (a `sin`), so compute it at control rate.
     pub fn coefficient(cutoff: f32, sample_rate: f32) -> f32 {
-        (2.0 * (PI * cutoff.clamp(20.0, sample_rate * 0.18) / sample_rate).sin()).min(1.2)
+        let sample_rate = sample_rate.max(1.0);
+        let max_cutoff = (sample_rate * 0.18).max(20.0);
+        let cutoff = if cutoff.is_finite() {
+            cutoff.clamp(20.0, max_cutoff)
+        } else {
+            20_000.0f32.min(max_cutoff)
+        };
+        (2.0 * (PI * cutoff / sample_rate).sin()).min(1.2)
     }
 
     /// Damping for `resonance` (0..1).

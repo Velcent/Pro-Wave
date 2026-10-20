@@ -18,11 +18,15 @@ mod synth;
 mod tempo_map;
 
 pub use crate::core::{
-    dsp_load, AudioClip, Command, EngineCore, NoteEvent, Shared, Song, TrackMix, MAX_TRACKS,
+    dsp_load, AudioClip, ClipEdit, Command, EngineCore, FadeCurve, NoteEvent, Shared, Song,
+    TrackMix, MAX_TRACKS,
 };
-pub use crate::disk::{AudioError, AudioFile, DiskThread};
-pub use crate::output::{Engine, EngineError};
+pub use crate::disk::{
+    ring_blocks_for, AudioError, AudioFile, DiskThread, RING_BLOCKS, RING_BLOCKS_MAX,
+};
+pub use crate::output::{peak_of, Engine, EngineError};
 pub use crate::synth::{Kit, SynthPatch, Wave};
 pub use crate::tempo_map::{
-    MusicalPosition, SignatureEvent, TempoEvent, TempoMap, MAX_BPM, MIN_BPM,
+    MusicalPosition, SignatureEvent, Smpte, SmpteRate, TempoCurve, TempoEvent, TempoMap, MAX_BPM,
+    MIN_BPM,
 };

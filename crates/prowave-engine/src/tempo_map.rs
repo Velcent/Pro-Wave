@@ -3,9 +3,9 @@
 //!
 //! Positions are beats = quarter notes from the project start (0-based), like the rest of the
 //! engine; as in Logic, the tempo is always quarter notes per minute whatever the signature.
-//! Tempo changes are steps (the tempo holds until the next event). Segments are computed when
-//! the map is built (on the UI thread), so every lookup on the audio thread is a binary search
-//! that never allocates. Replace the engine's map with `Command::SetTempoMap`.
+//! Tempo changes can hold or ramp linearly in beat space until the next event. Segments are
+//! computed when the map is built (on the UI thread), so every lookup on the audio thread is a
+//! binary search and arithmetic only. Replace the engine's map with `Command::SetTempoMap`.
 
 /// Logic Pro's tempo range.
 pub const MIN_BPM: f32 = 5.0;
@@ -16,6 +16,54 @@ pub const MAX_BPM: f32 = 990.0;
 pub struct TempoEvent {
     pub beat: f64,
     pub bpm: f32,
+    /// How tempo moves from this event to the next (Logic Pro: Tempo curve).
+    pub curve: TempoCurve,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TempoCurve {
+    #[default]
+    Step,
+    Linear,
+}
+
+/// SMPTE frame-rate conventions for Logic Pro's time display and synchronization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmpteRate {
+    Fps24,
+    Fps25,
+    Fps29_97NonDrop,
+    Fps29_97Drop,
+    Fps30,
+}
+
+impl SmpteRate {
+    fn frames_per_second(self) -> f64 {
+        match self {
+            Self::Fps24 => 24.0,
+            Self::Fps25 => 25.0,
+            Self::Fps29_97Drop | Self::Fps29_97NonDrop => 30_000.0 / 1_001.0,
+            Self::Fps30 => 30.0,
+        }
+    }
+
+    fn nominal_fps(self) -> u64 {
+        match self {
+            Self::Fps24 => 24,
+            Self::Fps25 => 25,
+            Self::Fps29_97Drop | Self::Fps29_97NonDrop | Self::Fps30 => 30,
+        }
+    }
+}
+
+/// SMPTE timecode. `subframe` is hundredths of a frame (0..99).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Smpte {
+    pub h: u8,
+    pub m: u8,
+    pub s: u8,
+    pub f: u8,
+    pub subframe: u8,
 }
 
 /// Time signature `num/den` from the start of `bar` (0-based) on.
@@ -42,6 +90,29 @@ struct TempoSegment {
     beat: f64,
     seconds: f64,
     bpm: f64,
+    slope: f64,
+}
+
+impl TempoSegment {
+    fn bpm_at(&self, beat: f64) -> f64 {
+        self.bpm + self.slope * (beat - self.beat)
+    }
+
+    fn seconds_after(&self, beats: f64) -> f64 {
+        if self.slope == 0.0 {
+            beats * 60.0 / self.bpm
+        } else {
+            (60.0 / self.slope) * (self.slope * beats / self.bpm).ln_1p()
+        }
+    }
+
+    fn beats_after(&self, seconds: f64) -> f64 {
+        if self.slope == 0.0 {
+            seconds * self.bpm / 60.0
+        } else {
+            (self.bpm / self.slope) * (seconds * self.slope / 60.0).exp_m1()
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -80,7 +151,11 @@ impl TempoMap {
     /// One tempo and one signature for the whole project.
     pub fn constant(bpm: f32, sig: (u8, u8)) -> Self {
         Self::new(
-            vec![TempoEvent { beat: 0.0, bpm }],
+            vec![TempoEvent {
+                beat: 0.0,
+                bpm,
+                curve: TempoCurve::Step,
+            }],
             vec![SignatureEvent {
                 bar: 0,
                 num: sig.0,
@@ -102,25 +177,44 @@ impl TempoMap {
             let same = later.beat == kept.beat;
             if same {
                 kept.bpm = later.bpm;
+                kept.curve = later.curve;
             }
             same
         });
-        let mut segs: Vec<TempoSegment> = Vec::with_capacity(tempos.len().max(1));
-        for (i, e) in tempos.iter().enumerate() {
-            let bpm = e.bpm.clamp(MIN_BPM, MAX_BPM) as f64;
-            // The first tempo holds from the start of the project.
-            let beat = if i == 0 { 0.0 } else { e.beat };
-            let seconds = match segs.last() {
-                Some(p) => p.seconds + (beat - p.beat) * 60.0 / p.bpm,
-                None => 0.0,
-            };
-            segs.push(TempoSegment { beat, seconds, bpm });
-        }
-        if segs.is_empty() {
-            segs.push(TempoSegment {
+        if tempos.is_empty() {
+            tempos.push(TempoEvent {
                 beat: 0.0,
-                seconds: 0.0,
                 bpm: 120.0,
+                curve: TempoCurve::Step,
+            });
+        }
+        let mut segs: Vec<TempoSegment> = Vec::with_capacity(tempos.len());
+        for (i, e) in tempos.iter().enumerate() {
+            // The first event holds from the project start, even if its source beat is later.
+            let beat = if i == 0 { 0.0 } else { e.beat };
+            let bpm = e.bpm.clamp(MIN_BPM, MAX_BPM) as f64;
+            let seconds = segs.last().map_or(0.0, |prev: &TempoSegment| {
+                prev.seconds + prev.seconds_after(beat - prev.beat)
+            });
+            let slope = tempos.get(i + 1).map_or(0.0, |next| {
+                if e.curve == TempoCurve::Linear {
+                    let end_beat = next.beat;
+                    let end_bpm = next.bpm.clamp(MIN_BPM, MAX_BPM) as f64;
+                    let slope = (end_bpm - bpm) / (end_beat - beat);
+                    if slope.is_finite() {
+                        slope
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                }
+            });
+            segs.push(TempoSegment {
+                beat,
+                seconds,
+                bpm,
+                slope,
             });
         }
 
@@ -177,7 +271,14 @@ impl TempoMap {
 
     /// Tempo in effect at `beat`.
     pub fn tempo_at(&self, beat: f64) -> f32 {
-        self.tempo_seg(beat).bpm as f32
+        if beat.is_nan() {
+            return self.tempos[0].bpm as f32;
+        }
+        if beat < 0.0 {
+            return self.tempos[0].bpm as f32;
+        }
+        let s = self.tempo_seg(beat);
+        s.bpm_at(beat).clamp(MIN_BPM as f64, MAX_BPM as f64) as f32
     }
 
     /// Time signature in effect at `beat`.
@@ -188,21 +289,151 @@ impl TempoMap {
 
     /// Seconds from the project start to `beat`.
     pub fn seconds_at(&self, beat: f64) -> f64 {
+        if beat.is_nan() {
+            return f64::NAN;
+        }
+        if beat < 0.0 {
+            return beat * 60.0 / self.tempos[0].bpm;
+        }
         let s = self.tempo_seg(beat);
-        s.seconds + (beat - s.beat) * 60.0 / s.bpm
+        s.seconds + s.seconds_after(beat - s.beat)
     }
 
     /// Beat reached `seconds` after the project start (inverse of [`TempoMap::seconds_at`]).
     pub fn beat_at(&self, seconds: f64) -> f64 {
+        if seconds.is_nan() {
+            return f64::NAN;
+        }
+        if seconds < 0.0 {
+            return seconds * self.tempos[0].bpm / 60.0;
+        }
         let i = self.tempos.partition_point(|s| s.seconds <= seconds);
         let s = &self.tempos[i.saturating_sub(1)];
-        s.beat + (seconds - s.seconds) * s.bpm / 60.0
+        s.beat + s.beats_after(seconds - s.seconds)
     }
 
     /// The beat `seconds` after `beat`, following every tempo change in between
     /// (the transport clock: called once per sample with `1 / sample_rate`).
     pub fn advance(&self, beat: f64, seconds: f64) -> f64 {
-        self.beat_at(self.seconds_at(beat) + seconds)
+        if beat.is_nan() || seconds.is_nan() {
+            return f64::NAN;
+        }
+        if seconds < 0.0 {
+            return self.beat_at(self.seconds_at(beat) + seconds);
+        }
+        if seconds == 0.0 {
+            return beat;
+        }
+
+        let mut position = beat;
+        let mut remaining = seconds;
+        if position < 0.0 {
+            let to_zero = -position * 60.0 / self.tempos[0].bpm;
+            if remaining < to_zero {
+                return position + remaining * self.tempos[0].bpm / 60.0;
+            }
+            remaining -= to_zero;
+            position = 0.0;
+        }
+        let mut index = self
+            .tempos
+            .partition_point(|segment| segment.beat <= position)
+            .saturating_sub(1);
+        loop {
+            let segment = &self.tempos[index];
+            // Rebase the ramp at the current position. `seconds_after` and `beats_after`
+            // use the segment's starting BPM, while this advance may begin mid-ramp.
+            let local = TempoSegment {
+                beat: position,
+                seconds: 0.0,
+                bpm: segment.bpm_at(position),
+                slope: segment.slope,
+            };
+            if let Some(next) = self.tempos.get(index + 1) {
+                let distance = next.beat - position;
+                let advance = local.beats_after(remaining);
+                if advance < distance {
+                    return position + advance;
+                }
+                // Integrate only when this advance actually crosses a boundary.
+                // For a ramp, seconds_after() takes a logarithm; the usual per-sample
+                // path above needs only the inverse calculation.
+                let to_next = local.seconds_after(distance);
+                remaining -= to_next;
+                position = next.beat;
+                index += 1;
+            } else {
+                return position + local.beats_after(remaining);
+            }
+        }
+    }
+
+    /// SMPTE timecode at `beat`, with the project starting at `00:00:00:00`.
+    pub fn smpte_at(&self, beat: f64, rate: SmpteRate) -> Smpte {
+        self.smpte_at_with_offset(beat, rate, 0)
+    }
+
+    /// SMPTE timecode at `beat`, adding a signed project start offset in frames.
+    /// Timecode wraps at 24 hours. Drop-frame mode skips labels `;00` and `;01`
+    /// at the start of each minute except every tenth minute.
+    pub fn smpte_at_with_offset(&self, beat: f64, rate: SmpteRate, offset_frames: i64) -> Smpte {
+        let nominal = rate.nominal_fps();
+        let actual_fps = rate.frames_per_second();
+        let seconds = self.seconds_at(beat);
+        let frames = seconds * actual_fps + offset_frames as f64;
+        if !frames.is_finite() {
+            return Smpte::default();
+        }
+        // A position that is exactly on a frame (a timecode converted to seconds and back)
+        // can land a hair below it: `frame / fps * fps` is 2.9999999999999996, not 3, and
+        // flooring that would label it one frame early. A millionth of a frame is 40 ns.
+        let frames = if frames.abs() < 1e12 {
+            (frames * 1e6).round() / 1e6
+        } else {
+            frames
+        };
+
+        // A 24-hour drop-frame day contains 2,589,408 actual frames. Other rates
+        // wrap at their nominal 24-hour label count.
+        let day_frames = if rate == SmpteRate::Fps29_97Drop {
+            2_589_408_i64
+        } else {
+            (nominal * 24 * 60 * 60) as i64
+        };
+        let mut frame_index = frames.floor() as i64 % day_frames;
+        if frame_index < 0 {
+            frame_index += day_frames;
+        }
+        let subframe = ((frames - frames.floor()) * 100.0).floor() as u8;
+
+        let label_index = if rate == SmpteRate::Fps29_97Drop {
+            let frames_per_ten_minutes = 17_982_i64;
+            let frames_per_minute = 1_798_i64;
+            let ten_minute_blocks = frame_index / frames_per_ten_minutes;
+            let remainder = frame_index % frames_per_ten_minutes;
+            let dropped = 18 * ten_minute_blocks
+                + if remainder >= 2 {
+                    2 * ((remainder - 2) / frames_per_minute)
+                } else {
+                    0
+                };
+            frame_index + dropped
+        } else {
+            frame_index
+        } as u64;
+        let frames_per_day_label = nominal * 24 * 60 * 60;
+        let label_index = label_index % frames_per_day_label;
+        let f = label_index % nominal;
+        let total_seconds = label_index / nominal;
+        let s = total_seconds % 60;
+        let total_minutes = total_seconds / 60;
+        Smpte {
+            h: (total_minutes / 60) as u8,
+            m: (total_minutes % 60) as u8,
+            s: s as u8,
+            f: f as u8,
+            subframe,
+        }
     }
 
     /// Beat at which `bar` (0-based) starts.
@@ -239,7 +470,11 @@ mod tests {
     }
 
     fn tempo(beat: f64, bpm: f32) -> TempoEvent {
-        TempoEvent { beat, bpm }
+        TempoEvent {
+            beat,
+            bpm,
+            curve: TempoCurve::Step,
+        }
     }
 
     fn sig(bar: u32, num: u8, den: u8) -> SignatureEvent {
@@ -264,6 +499,134 @@ mod tests {
         assert!(close(m.beat_at(6.0), 8.0));
         // 0.5 s reaches beat 4, the other 0.5 s at 60 BPM adds half a beat.
         assert!(close(m.advance(3.0, 1.0), 4.5));
+    }
+
+    #[test]
+    fn linear_tempo_ramp_integrates_and_inverts_exactly() {
+        let map = TempoMap::new(
+            vec![
+                TempoEvent {
+                    beat: 0.0,
+                    bpm: 120.0,
+                    curve: TempoCurve::Linear,
+                },
+                tempo(4.0, 60.0),
+            ],
+            vec![],
+        );
+        assert_eq!(map.tempo_at(0.0), 120.0);
+        assert_eq!(map.tempo_at(2.0), 90.0);
+        assert_eq!(map.tempo_at(4.0), 60.0);
+        let expected_seconds = 4.0 * 2.0f64.ln();
+        assert!(close(map.seconds_at(4.0), expected_seconds));
+        for beat in [0.0, 0.25, 1.0, 2.0, 3.75, 4.0, 8.0] {
+            assert!(close(map.beat_at(map.seconds_at(beat)), beat));
+        }
+        assert!(close(map.advance(0.0, expected_seconds), 4.0));
+    }
+
+    #[test]
+    fn direct_advance_matches_time_conversion_across_segments() {
+        let map = TempoMap::new(
+            vec![
+                TempoEvent {
+                    beat: 0.0,
+                    bpm: 110.0,
+                    curve: TempoCurve::Linear,
+                },
+                tempo(3.0, 170.0),
+                TempoEvent {
+                    beat: 7.0,
+                    bpm: 80.0,
+                    curve: TempoCurve::Linear,
+                },
+                tempo(12.0, 50.0),
+            ],
+            vec![],
+        );
+        for (beat, seconds) in [
+            (0.1, 0.03),
+            (2.99, 0.1),
+            (4.0, 2.0),
+            (6.99, 0.1),
+            (10.0, 4.0),
+            (-1.0, 1.0),
+        ] {
+            let expected = map.beat_at(map.seconds_at(beat) + seconds);
+            assert!(close(map.advance(beat, seconds), expected));
+        }
+        // Samples immediately before, on, and after each boundary must preserve
+        // the same timing for both rising and falling ramps.
+        for start in [-1.0, 0.0, 0.1, 3.0, 6.99, 7.0, 10.0] {
+            for boundary in [3.0, 7.0, 12.0] {
+                let until_boundary = map.seconds_at(boundary) - map.seconds_at(start);
+                for delta in [-1e-10, 0.0, 1e-10] {
+                    let seconds = until_boundary + delta;
+                    let expected = map.beat_at(map.seconds_at(start) + seconds);
+                    assert!(close(map.advance(start, seconds), expected));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn smpte_rates_offsets_and_drop_frame_labels() {
+        let map = TempoMap::constant(120.0, (4, 4));
+        let beat_at_frames = |frames: f64, fps: f64| frames / fps * 2.0;
+
+        let drop_minute = map.smpte_at(
+            beat_at_frames(1_800.0, 30_000.0 / 1_001.0),
+            SmpteRate::Fps29_97Drop,
+        );
+        assert_eq!(
+            drop_minute,
+            Smpte {
+                h: 0,
+                m: 1,
+                s: 0,
+                f: 2,
+                subframe: 0
+            }
+        );
+
+        let tenth_minute = map.smpte_at(
+            beat_at_frames(17_982.0, 30_000.0 / 1_001.0),
+            SmpteRate::Fps29_97Drop,
+        );
+        assert_eq!(
+            tenth_minute,
+            Smpte {
+                h: 0,
+                m: 10,
+                s: 0,
+                f: 0,
+                subframe: 0
+            }
+        );
+
+        let offset = map.smpte_at_with_offset(0.0, SmpteRate::Fps25, 25 * 3_661);
+        assert_eq!(
+            offset,
+            Smpte {
+                h: 1,
+                m: 1,
+                s: 1,
+                f: 0,
+                subframe: 0
+            }
+        );
+
+        let subframe = map.smpte_at(0.001, SmpteRate::Fps24);
+        assert_eq!(
+            subframe,
+            Smpte {
+                h: 0,
+                m: 0,
+                s: 0,
+                f: 0,
+                subframe: 1
+            }
+        );
     }
 
     #[test]
@@ -297,6 +660,23 @@ mod tests {
     }
 
     #[test]
+    fn last_duplicate_tempo_event_keeps_its_curve() {
+        let map = TempoMap::new(
+            vec![
+                tempo(0.0, 120.0),
+                TempoEvent {
+                    beat: 0.0,
+                    bpm: 120.0,
+                    curve: TempoCurve::Linear,
+                },
+                tempo(4.0, 60.0),
+            ],
+            vec![],
+        );
+        assert!(close(map.seconds_at(4.0), 4.0 * 2.0f64.ln()));
+    }
+
+    #[test]
     fn signature_changes_move_bar_lines() {
         // Bars 0-1 in 4/4 (8 beats), then 6/8 (3 quarter notes per bar).
         let m = TempoMap::new(vec![], vec![sig(0, 4, 4), sig(2, 6, 8)]);
@@ -312,5 +692,42 @@ mod tests {
         let p = m.position(5.0);
         assert_eq!((p.bar, p.beat), (1, 1));
         assert_eq!(m.position(-3.0).bar, 0);
+    }
+
+    #[test]
+    fn frame_exact_positions_get_their_own_frame_label() {
+        // 60 BPM: one beat per second, so the beat is the time in seconds.
+        let map = TempoMap::constant(60.0, (4, 4));
+        for (rate, fps, nominal) in [
+            (SmpteRate::Fps24, 24.0, 24u64),
+            (SmpteRate::Fps25, 25.0, 25),
+            (SmpteRate::Fps30, 30.0, 30),
+            (SmpteRate::Fps29_97NonDrop, 30_000.0 / 1_001.0, 30),
+        ] {
+            for frame in 0..200_000u64 {
+                let t = map.smpte_at(frame as f64 / fps, rate);
+                let n = frame;
+                let want = (
+                    (n / (nominal * 3600)) % 24,
+                    (n / (nominal * 60)) % 60,
+                    (n / nominal) % 60,
+                    n % nominal,
+                );
+                let got = (t.h as u64, t.m as u64, t.s as u64, t.f as u64);
+                assert_eq!(got, want, "{rate:?} frame {frame}");
+                assert_eq!(t.subframe, 0, "{rate:?} frame {frame}");
+            }
+        }
+        // Drop frame: the label skips ;00 and ;01 each minute except every tenth.
+        let fps = 30_000.0 / 1_001.0;
+        let at = |frame: u64| map.smpte_at(frame as f64 / fps, SmpteRate::Fps29_97Drop);
+        let label = |t: Smpte| (t.h, t.m, t.s, t.f);
+        assert_eq!(label(at(1799)), (0, 0, 59, 29));
+        assert_eq!(label(at(1800)), (0, 1, 0, 2));
+        assert_eq!(label(at(17_981)), (0, 9, 59, 29));
+        assert_eq!(label(at(17_982)), (0, 10, 0, 0));
+        // And just before a frame is still the previous one.
+        let before = map.smpte_at(100.0 / fps - 1e-4, SmpteRate::Fps29_97Drop);
+        assert_eq!(label(before), (0, 0, 3, 9));
     }
 }

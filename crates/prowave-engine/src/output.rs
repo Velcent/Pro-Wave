@@ -1,6 +1,6 @@
 //! cpal output: owns the stream, the command producer and the shared state.
-use crate::core::{dsp_load, AudioClip, Command, EngineCore, Garbage, Shared};
-use crate::disk::{AudioFile, DiskThread};
+use crate::core::{dsp_load, AudioClip, ClipEdit, Command, EngineCore, Garbage, Shared};
+use crate::disk::{AudioError, AudioFile, DiskThread};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{
     BufferSize, Error, ErrorKind, FromSample, OutputCallbackInfo, SampleFormat, SizedSample,
@@ -89,6 +89,7 @@ pub enum EngineError {
     NoOutputDevice,
     UnsupportedSampleFormat(String),
     Backend(String),
+    AudioFile(String),
 }
 
 impl fmt::Display for EngineError {
@@ -97,11 +98,24 @@ impl fmt::Display for EngineError {
             Self::NoOutputDevice => write!(f, "no audio output device available"),
             Self::UnsupportedSampleFormat(s) => write!(f, "unsupported sample format {s}"),
             Self::Backend(s) => write!(f, "audio backend error: {s}"),
+            Self::AudioFile(s) => write!(f, "audio file error: {s}"),
         }
     }
 }
 
 impl std::error::Error for EngineError {}
+
+impl From<AudioError> for EngineError {
+    fn from(error: AudioError) -> Self {
+        Self::AudioFile(error.to_string())
+    }
+}
+
+/// Decodes `file` off the audio thread and returns its maximum absolute sample value.
+/// Use `20 * log10(peak)` to calculate the non-destructive gain for normalization.
+pub fn peak_of(file: &AudioFile) -> Result<f32, EngineError> {
+    file.peak().map_err(EngineError::from)
+}
 
 /// UI-thread handle. Not `Send` on some platforms (cpal `Stream`); keep it on the UI thread.
 pub struct Engine {
@@ -145,6 +159,15 @@ impl Engine {
             }
         }
         Err(last)
+    }
+
+    /// Starts on the ASIO host (Windows builds with the `asio` feature only).
+    /// Use this to avoid shared-mode WASAPI buffering when a native ASIO driver is available.
+    #[cfg(all(windows, feature = "asio"))]
+    pub fn start_asio_with(buffer_frames: Option<u32>) -> Result<Self, EngineError> {
+        let host = cpal::host_from_id(cpal::HostId::Asio)
+            .map_err(|error| EngineError::Backend(error.to_string()))?;
+        Self::start_on_host(&host, buffer_frames)
     }
 
     fn start_on_host(host: &cpal::Host, buffer_frames: Option<u32>) -> Result<Self, EngineError> {
@@ -269,7 +292,42 @@ impl Engine {
     /// Streams `file` from disk as an audio region on `track` starting at `start_beat`.
     /// Put the result in [`crate::Song::with_clips`] and send it with `Command::SetSong`.
     pub fn stream_clip(&self, file: &AudioFile, track: u8, start_beat: f64) -> AudioClip {
-        self.disk.stream(file, self.sample_rate, track, start_beat)
+        self.stream_clip_with(file, track, start_beat, ClipEdit::default())
+    }
+
+    /// [`Engine::stream_clip_with`] for a song with `clips_in_song` streamed regions in all:
+    /// every clip buffers ahead as much as the song's 8 MiB prefetch budget allows
+    /// (between 170 ms and 0.68 s), so a few regions stay safe against a held-up disk and
+    /// hundreds of regions stay light. Pass the same count for every clip of the song.
+    pub fn stream_clip_in(
+        &self,
+        file: &AudioFile,
+        track: u8,
+        start_beat: f64,
+        edit: ClipEdit,
+        clips_in_song: usize,
+    ) -> AudioClip {
+        self.disk.stream_with_ring(
+            file,
+            self.sample_rate,
+            track,
+            start_beat,
+            edit,
+            crate::disk::ring_blocks_for(clips_in_song),
+        )
+    }
+
+    /// Streams an audio region with non-destructive gain, beat-based fades, and reverse.
+    /// It buffers the most ahead; for a song with many regions use [`Engine::stream_clip_in`].
+    pub fn stream_clip_with(
+        &self,
+        file: &AudioFile,
+        track: u8,
+        start_beat: f64,
+        edit: ClipEdit,
+    ) -> AudioClip {
+        self.disk
+            .stream_with(file, self.sample_rate, track, start_beat, edit)
     }
 }
 

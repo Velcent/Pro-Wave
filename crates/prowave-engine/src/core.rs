@@ -41,6 +41,24 @@ impl Default for TrackMix {
     }
 }
 
+impl TrackMix {
+    fn sanitized(self) -> Self {
+        Self {
+            gain_db: if self.gain_db.is_finite() {
+                self.gain_db.clamp(-96.0, 6.0)
+            } else {
+                0.0
+            },
+            pan: if self.pan.is_finite() {
+                self.pan.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            },
+            ..self
+        }
+    }
+}
+
 /// Immutable-by-the-audio-thread snapshot of the arrangement.
 #[derive(Default)]
 pub struct Song {
@@ -72,8 +90,11 @@ impl Song {
 pub struct AudioClip {
     pub track: u8,
     pub start_beat: f64,
+    end_beat: f64,
     /// Length in device-rate frames.
     pub len_frames: u64,
+    edit: ClipEdit,
+    gain_linear: f32,
     rx: Consumer<Block>,
     shared: Arc<ClipShared>,
     gen: u16,
@@ -83,18 +104,79 @@ pub struct AudioClip {
     underruns: u32,
 }
 
+/// Non-destructive region edits (Logic Pro: Region Inspector Gain, Fade In/Out, Reverse).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClipEdit {
+    /// Region gain in dB, clamped to -96..=+24.
+    pub gain_db: f32,
+    /// Fade durations in quarter-note beats, following the project tempo map.
+    pub fade_in_beats: f64,
+    pub fade_out_beats: f64,
+    pub fade_curve: FadeCurve,
+    pub reverse: bool,
+}
+
+impl Default for ClipEdit {
+    fn default() -> Self {
+        Self {
+            gain_db: 0.0,
+            fade_in_beats: 0.0,
+            fade_out_beats: 0.0,
+            fade_curve: FadeCurve::EqualPower,
+            reverse: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum FadeCurve {
+    Linear,
+    #[default]
+    EqualPower,
+    SCurve,
+}
+
+impl ClipEdit {
+    fn clean(self) -> Self {
+        Self {
+            gain_db: if self.gain_db.is_finite() {
+                self.gain_db.clamp(-96.0, 24.0)
+            } else {
+                0.0
+            },
+            fade_in_beats: if self.fade_in_beats.is_finite() {
+                self.fade_in_beats.max(0.0)
+            } else {
+                0.0
+            },
+            fade_out_beats: if self.fade_out_beats.is_finite() {
+                self.fade_out_beats.max(0.0)
+            } else {
+                0.0
+            },
+            ..self
+        }
+    }
+}
+
 impl AudioClip {
     pub(crate) fn new(
         track: u8,
         start_beat: f64,
         len_frames: u64,
+        edit: ClipEdit,
         rx: Consumer<Block>,
         shared: Arc<ClipShared>,
     ) -> Self {
+        let edit = edit.clean();
+        let gain_linear = 10.0f32.powf(edit.gain_db / 20.0);
         Self {
             track,
             start_beat,
+            end_beat: start_beat,
             len_frames,
+            edit,
+            gain_linear,
             rx,
             shared,
             gen: 0,
@@ -153,6 +235,29 @@ impl AudioClip {
                 }
             }
         }
+    }
+
+    fn envelope(&self, beat: f64, end_beat: f64) -> f32 {
+        let curve = |x: f64| -> f32 {
+            let x = x.clamp(0.0, 1.0);
+            // Outside the fade, return its exact endpoint without evaluating sin.
+            if x == 0.0 || x == 1.0 {
+                return x as f32;
+            }
+            match self.edit.fade_curve {
+                FadeCurve::Linear => x as f32,
+                FadeCurve::EqualPower => (x * std::f64::consts::FRAC_PI_2).sin() as f32,
+                FadeCurve::SCurve => (x * x * (3.0 - 2.0 * x)) as f32,
+            }
+        };
+        let mut gain = self.gain_linear;
+        if self.edit.fade_in_beats > 0.0 {
+            gain *= curve((beat - self.start_beat) / self.edit.fade_in_beats);
+        }
+        if self.edit.fade_out_beats > 0.0 {
+            gain *= curve((end_beat - beat) / self.edit.fade_out_beats);
+        }
+        gain
     }
 }
 
@@ -449,7 +554,7 @@ impl EngineCore {
         shared: Arc<Shared>,
     ) -> Self {
         Self {
-            sr: sample_rate as f32,
+            sr: sample_rate.max(1) as f32,
             rx,
             trash,
             shared,
@@ -489,7 +594,7 @@ impl EngineCore {
     }
 
     fn seek(&mut self, beat: f64) {
-        self.beat = beat.max(0.0);
+        self.beat = if beat.is_finite() { beat.max(0.0) } else { 0.0 };
         self.kill_voices();
         self.next_note = self
             .song
@@ -503,7 +608,11 @@ impl EngineCore {
         let map = &self.tempo_map;
         let now = map.seconds_at(self.beat);
         for c in self.song.clips.iter_mut() {
-            let since = now - map.seconds_at(c.start_beat);
+            let start = map.seconds_at(c.start_beat);
+            // Refresh on song/map changes and seeks. The region's end is constant
+            // between these events, including while transport is stopped.
+            c.end_beat = map.beat_at(start + c.len_frames as f64 / self.sr as f64);
+            let since = now - start;
             c.reposition((since * self.sr as f64).round() as i64);
         }
     }
@@ -520,19 +629,25 @@ impl EngineCore {
         }
     }
 
-    fn rebuild_mix(&mut self, smooth: bool) {
+    fn rebuild_mix(&mut self, smooth: bool, changed_track: Option<usize>) {
         let samples = if smooth { self.smoothing_samples() } else { 0 };
         self.mix_ramp_remaining = samples;
         let any_solo = self.song.tracks.iter().any(|t| t.solo);
         for i in 0..MAX_TRACKS {
             match self.song.tracks.get(i) {
                 Some(t) => {
+                    // Solo affects every channel, but another channel's gain/pan
+                    // target is unchanged. Preserve full immediate resets when silent.
+                    self.track_audible[i] = !t.mute && (!any_solo || t.solo);
+                    if samples > 0 && changed_track.is_some_and(|track| track != i) {
+                        continue;
+                    }
+                    let t = t.sanitized();
                     let g = 10f32.powf(t.gain_db / 20.0);
                     // Equal-power pan law, normalised so the centre is unity gain.
                     let a = (t.pan.clamp(-1.0, 1.0) + 1.0) * std::f32::consts::FRAC_PI_4;
                     self.track_ramp_l[i].set(g * a.cos() * std::f32::consts::SQRT_2, samples);
                     self.track_ramp_r[i].set(g * a.sin() * std::f32::consts::SQRT_2, samples);
-                    self.track_audible[i] = !t.mute && (!any_solo || t.solo);
                 }
                 None => {
                     self.track_ramp_l[i].set(1.0, 0);
@@ -599,8 +714,8 @@ impl EngineCore {
                 }
                 Command::SetTrackMix { track, mix } => {
                     if let Some(t) = self.song.tracks.get_mut(track as usize) {
-                        *t = mix;
-                        self.rebuild_mix(true);
+                        *t = mix.sanitized();
+                        self.rebuild_mix(true, Some(track as usize));
                     }
                 }
                 Command::NoteOn { pitch, vel, track } => {
@@ -610,17 +725,25 @@ impl EngineCore {
                 Command::NoteOffTrack { pitch, track } => self.live_note_off(pitch, Some(track)),
                 Command::SetTrackPatch { track, patch } => {
                     if let Some(slot) = self.track_patch.get_mut(track as usize) {
-                        *slot = patch;
+                        *slot = patch.sanitized();
                     }
                 }
                 Command::SetTestTone { hz, gain } => {
-                    self.test_hz = hz.clamp(0.0, self.sr * 0.45);
-                    self.test_gain = gain.clamp(0.0, 1.0);
+                    self.test_hz = if hz.is_finite() {
+                        hz.clamp(0.0, self.sr * 0.45)
+                    } else {
+                        0.0
+                    };
+                    self.test_gain = if gain.is_finite() {
+                        gain.clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
                 }
                 Command::SetSong(new) => {
                     let old = std::mem::replace(&mut self.song, new);
                     let _ = self.trash.push(Garbage::Song(old));
-                    self.rebuild_mix(false);
+                    self.rebuild_mix(false, None);
                     let b = self.beat;
                     self.seek(b);
                 }
@@ -718,6 +841,7 @@ impl EngineCore {
         self.track_pk_r = [0.0; MAX_TRACKS];
 
         for frame in out.as_chunks_mut::<2>().0 {
+            let sample_beat = self.beat;
             // Advance once per track/sample, not once per voice or overlapping audio clip.
             if self.mix_ramp_remaining > 0 {
                 for i in 0..MAX_TRACKS {
@@ -741,7 +865,11 @@ impl EngineCore {
                     if let Some((cl, cr)) = c.tick() {
                         let t = (c.track as usize).min(MAX_TRACKS - 1);
                         if self.track_audible[t] {
-                            let (xl, xr) = (cl * self.track_gain_l[t], cr * self.track_gain_r[t]);
+                            let edit_gain = c.envelope(sample_beat, c.end_beat);
+                            let (xl, xr) = (
+                                cl * edit_gain * self.track_gain_l[t],
+                                cr * edit_gain * self.track_gain_r[t],
+                            );
                             l += xl;
                             r += xr;
                             self.track_pk_l[t] = self.track_pk_l[t].max(xl.abs());
@@ -839,7 +967,7 @@ impl EngineCore {
                 }
                 let t = v.track as usize;
                 if self.track_audible[t] {
-                    let x = x * v.amp * v.env;
+                    let x = finite_or_zero(x * v.amp * v.env);
                     let (xl, xr) = (x * self.track_gain_l[t], x * self.track_gain_r[t]);
                     l += xl;
                     r += xr;
@@ -961,6 +1089,170 @@ mod tests {
     }
 
     #[test]
+    fn clip_fade_timing_refreshes_after_tempo_and_song_changes_without_allocating() {
+        let (mut core, mut tx, _) = rig();
+        let (mut producer, consumer) = rtrb::RingBuffer::new(8);
+        let clip = AudioClip::new(
+            0,
+            4.0,
+            48_000,
+            ClipEdit {
+                fade_out_beats: 1.0,
+                fade_curve: FadeCurve::Linear,
+                ..ClipEdit::default()
+            },
+            consumer,
+            Arc::new(ClipShared::default()),
+        );
+        let song = Song::new(vec![], vec![TrackMix::default()]).with_clips(vec![clip]);
+        assert!(tx.push(Command::SetSong(Box::new(song))).is_ok());
+
+        for (bpm, expected_end, expected_sample) in
+            [(120.0, 6.0, 0.8), (60.0, 5.0, 0.4), (180.0, 7.0, 0.8)]
+        {
+            assert!(tx
+                .push(Command::SetTempoMap(Box::new(TempoMap::constant(
+                    bpm,
+                    (4, 4)
+                ))))
+                .is_ok());
+            assert!(tx.push(Command::SetPosition { beat: 4.5 }).is_ok());
+            assert!(tx.push(Command::Play).is_ok());
+            assert_no_alloc::assert_no_alloc(|| core.process(&mut []));
+            let clip = &core.song.clips[0];
+            assert!((clip.end_beat - expected_end).abs() < 1e-12);
+            assert!(producer
+                .push(Block {
+                    gen: clip.gen,
+                    start: clip.pos as u64,
+                    frames: 1024,
+                    data: [1.0; 2048],
+                })
+                .is_ok());
+            let mut out = [0.0; 2];
+            assert_no_alloc::assert_no_alloc(|| core.process(&mut out));
+            assert!(out.iter().all(|s| (*s - expected_sample).abs() < 1e-6));
+        }
+
+        let (_producer, consumer) = rtrb::RingBuffer::new(8);
+        let replacement = AudioClip::new(
+            0,
+            8.0,
+            96_000,
+            ClipEdit::default(),
+            consumer,
+            Arc::new(ClipShared::default()),
+        );
+        assert!(tx
+            .push(Command::SetSong(Box::new(
+                Song::default().with_clips(vec![replacement]),
+            )))
+            .is_ok());
+        assert_no_alloc::assert_no_alloc(|| core.process(&mut []));
+        assert!((core.song.clips[0].end_beat - 14.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn fade_curves_preserve_reference_gain_inside_outside_and_overlapping_fades() {
+        let (_producer, consumer) = rtrb::RingBuffer::new(8);
+        let mut clip = AudioClip::new(
+            0,
+            0.0,
+            96_000,
+            ClipEdit::default(),
+            consumer,
+            Arc::new(ClipShared::default()),
+        );
+        for curve in [FadeCurve::Linear, FadeCurve::EqualPower, FadeCurve::SCurve] {
+            for duration in [1.0, 3.0] {
+                clip.edit.fade_curve = curve;
+                clip.edit.fade_in_beats = duration;
+                clip.edit.fade_out_beats = duration;
+                for beat in [-1.0_f64, 0.0, 0.5, 1.0, 2.0, 3.0, 3.5, 4.0, 5.0] {
+                    let reference = |x: f64| {
+                        let x = x.clamp(0.0, 1.0);
+                        match curve {
+                            FadeCurve::Linear => x as f32,
+                            FadeCurve::EqualPower => (x * std::f64::consts::FRAC_PI_2).sin() as f32,
+                            FadeCurve::SCurve => (x * x * (3.0 - 2.0 * x)) as f32,
+                        }
+                    };
+                    let expected = reference(beat / duration) * reference((4.0 - beat) / duration);
+                    assert_eq!(clip.envelope(beat, 4.0), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn single_channel_mix_updates_match_full_rebuild_without_allocating() {
+        let (mut changed, mut changed_tx, _) = rig();
+        let (mut reference, mut reference_tx, _) = rig();
+        for tx in [&mut changed_tx, &mut reference_tx] {
+            assert!(tx
+                .push(Command::SetSong(Box::new(Song::new(
+                    vec![],
+                    vec![TrackMix::default(); 2],
+                ))))
+                .is_ok());
+            for (track, pitch) in [(0, 60), (1, 67)] {
+                assert!(tx
+                    .push(Command::NoteOn {
+                        track,
+                        pitch,
+                        vel: 80
+                    })
+                    .is_ok());
+            }
+        }
+        let mut actual = [0.0; 128];
+        let mut expected = [0.0; 128];
+        changed.process(&mut actual);
+        reference.process(&mut expected);
+        assert_eq!(actual, expected);
+
+        for (track, gain_db, pan, mute, solo) in [
+            (0, -6.0, -0.5, false, false),
+            (1, -9.0, 0.75, false, true),
+            (0, -3.0, 0.5, true, false),
+            (1, 0.0, 0.0, false, false),
+        ] {
+            let mix = TrackMix {
+                gain_db,
+                pan,
+                mute,
+                solo,
+            };
+            assert!(changed_tx.push(Command::SetTrackMix { track, mix }).is_ok());
+            reference.song.tracks[track as usize] = mix;
+            reference.rebuild_mix(true, None);
+            // Retarget while earlier 240-sample ramps are still running.
+            for _ in 0..2 {
+                assert_no_alloc::assert_no_alloc(|| changed.process(&mut actual));
+                assert_no_alloc::assert_no_alloc(|| reference.process(&mut expected));
+                assert_eq!(actual, expected);
+                assert_eq!(changed.track_audible, reference.track_audible);
+            }
+        }
+
+        // A silent edit must still complete every pending ramp immediately.
+        for core in [&mut changed, &mut reference] {
+            for voice in &mut core.voices {
+                voice.active = false;
+            }
+        }
+        let mix = TrackMix::default();
+        assert!(changed_tx
+            .push(Command::SetTrackMix { track: 0, mix })
+            .is_ok());
+        reference.song.tracks[0] = mix;
+        reference.rebuild_mix(false, None);
+        assert_no_alloc::assert_no_alloc(|| changed.process(&mut []));
+        assert_eq!(changed.track_gain_l, reference.track_gain_l);
+        assert_eq!(changed.track_gain_r, reference.track_gain_r);
+    }
+
+    #[test]
     fn full_garbage_queue_defers_state_in_order_and_does_not_allocate() {
         let (mut tx, rx) = rtrb::RingBuffer::new(8);
         let (gtx, mut grx) = rtrb::RingBuffer::new(1);
@@ -999,6 +1291,57 @@ mod tests {
         let mut buf = vec![1.0f32; 48_000 * 2];
         e.process(&mut buf);
         assert!(buf.iter().all(|x| x.is_finite() && *x == 0.0));
+    }
+
+    #[test]
+    fn invalid_public_parameters_cannot_poison_the_mix_or_transport() {
+        let (mut e, mut tx, _) = rig();
+        let tracks = vec![
+            TrackMix {
+                gain_db: f32::NAN,
+                pan: f32::INFINITY,
+                ..TrackMix::default()
+            },
+            TrackMix::default(),
+        ];
+        let song = Song::new(
+            vec![
+                note(0.0, 1.0),
+                NoteEvent {
+                    track: 1,
+                    ..note(0.0, 1.0)
+                },
+            ],
+            tracks,
+        );
+        assert!(tx.push(Command::SetSong(Box::new(song))).is_ok());
+        assert!(tx
+            .push(Command::SetTrackPatch {
+                track: 0,
+                patch: SynthPatch {
+                    gain: f32::INFINITY,
+                    semi_b: f32::MAX,
+                    ..SynthPatch::default()
+                },
+            })
+            .is_ok());
+        assert!(tx
+            .push(Command::SetTestTone {
+                hz: f32::NAN,
+                gain: f32::NAN
+            })
+            .is_ok());
+        assert!(tx
+            .push(Command::SetPosition {
+                beat: f64::INFINITY
+            })
+            .is_ok());
+        assert!(tx.push(Command::Play).is_ok());
+        let mut buf = [0.0; 1024];
+        assert_no_alloc::assert_no_alloc(|| e.process(&mut buf));
+        assert!(buf.iter().all(|x| x.is_finite()));
+        assert!(buf.iter().any(|x| x.abs() > 0.0));
+        assert!(e.beat.is_finite());
     }
 
     #[test]
@@ -1497,10 +1840,12 @@ mod tests {
                 TempoEvent {
                     beat: 0.0,
                     bpm: 120.0,
+                    curve: crate::tempo_map::TempoCurve::Step,
                 },
                 TempoEvent {
                     beat: 1.0,
                     bpm: 60.0,
+                    curve: crate::tempo_map::TempoCurve::Step,
                 },
             ],
             vec![],

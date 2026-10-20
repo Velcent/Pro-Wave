@@ -1,5 +1,5 @@
 //! Logic-style cycle transport must preserve elapsed time across fractional sample boundaries.
-use prowave_engine::{Command, EngineCore, Shared, TempoEvent, TempoMap};
+use prowave_engine::{Command, EngineCore, Shared, TempoCurve, TempoEvent, TempoMap};
 use std::sync::Arc;
 
 #[cfg(debug_assertions)]
@@ -12,10 +12,12 @@ fn render(chunk: usize) -> f64 {
             TempoEvent {
                 beat: 0.0,
                 bpm: 137.0,
+                curve: TempoCurve::Step,
             },
             TempoEvent {
                 beat: 0.5,
                 bpm: 83.0,
+                curve: TempoCurve::Step,
             },
         ],
         vec![],

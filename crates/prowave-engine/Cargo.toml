@@ -5,6 +5,11 @@ edition = "2021"
 description = "ProWave Studio real-time engine: lock-free transport, voices and cpal output"
 license = "GPL-3.0-or-later"
 
+[features]
+default = []
+# Optional on Windows: the ASIO SDK is required by cpal's ASIO backend.
+asio = ["cpal/asio"]
+
 [dependencies]
 symphonia = { version = "0.5", default-features = false, features = ["wav", "aiff", "pcm", "flac"] }
 cpal = "0.18.2"
