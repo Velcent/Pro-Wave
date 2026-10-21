@@ -3,6 +3,12 @@
 What changed in each Pro Wave release. The release workflow copies the section of the version
 being released into the GitHub Release notes, so keep one `## <version>` heading per release.
 
+## Unreleased
+
+### All systems (Windows, macOS, Linux)
+
+✅ **Check for Updates on slow connections:** the check now tries three times, 30 seconds each, before it reports a timeout.
+
 ## 0.1.9
 
 ### All systems (Windows, macOS, Linux)

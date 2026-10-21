@@ -340,15 +340,29 @@ fn agent(timeout: Duration) -> ureq::Agent {
 /// Asks GitHub for the newest release; `Some` when it is newer than the running program.
 fn fetch_latest() -> Result<Option<Release>, String> {
     let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=10");
-    let mut response = agent(Duration::from_secs(15))
-        .get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .call()
-        .map_err(|e| e.to_string())?;
-    let text = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| e.to_string())?;
+    // A slow or flaky connection (or a slow first connection through a proxy or antivirus)
+    // gets three tries of 30 seconds before the check gives up.
+    let mut last = String::new();
+    let mut text = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        let got = agent(Duration::from_secs(30))
+            .get(&url)
+            .header("Accept", "application/vnd.github+json")
+            .call()
+            .map_err(|e| e.to_string())
+            .and_then(|mut r| r.body_mut().read_to_string().map_err(|e| e.to_string()));
+        match got {
+            Ok(t) => {
+                text = Some(t);
+                break;
+            }
+            Err(e) => last = e,
+        }
+    }
+    let text = text.ok_or(last)?;
     parse_releases(
         &text,
         env!("CARGO_PKG_VERSION"),

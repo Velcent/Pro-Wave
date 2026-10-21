@@ -247,6 +247,9 @@ Rules: small diffs, `cargo xtask check` green, one commit per finding.
    (kept for now), PipeWire/JACK.
 3. ✅ (2026-10-21) Signature track, Fade tool, crossfades, VCA, External MIDI, MP3/CAF, 1000
    tracks. Tempo curves, SMPTE and MTC, Pattern and Drummer regions, memory-mapped streaming: ✅ (2026-10-21, see below).
+   ✅ 0.1.9 (2026-10-21): all of the above plus MIDI Transform, Modulator, Scripter, sustain pedal
+   and controllers to External MIDI, and the Score with clefs, key signatures, rests and ties.
+   Next release: Check for Updates retries on slow connections (3 tries of 30 s).
 4. Flex / Smart Tempo groundwork (Phases 2-3), real effects and buses.
 
 Engine items already done by ChatGPT 6 and reviewed on 2026-10-20: region gain, fades and
