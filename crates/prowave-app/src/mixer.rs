@@ -660,7 +660,7 @@ pub fn channel_strip(
 ) {
     let selected = matches!(key, StripKey::Track(i) if i == p.selected_track);
     let inactive = matches!(key, StripKey::Track(i)
-        if p.tracks[i].mute || crate::tracks_area::silenced_by_solo(p, i));
+        if p.is_muted(i) || crate::tracks_area::silenced_by_solo(p, i));
     let (plug, plug_text) = if inactive {
         (PLUGIN_OFF, TEXT_DIM)
     } else {
@@ -706,92 +706,123 @@ pub fn channel_strip(
         StripKey::Master => (tr("Master").to_string(), MASTER_PINK, vec![], None, None),
     };
 
-    slot(g, row(r.setting, 16.0), tr("Setting"), SLOT_GRAY, TEXT);
-    g.rect_filled(row(r.gain_red + 1.0, 6.0), 1.0, SLOT_EMPTY);
-    eq_thumb(g, row(r.eq, 24.0), inserts.iter().any(|x| x.contains("EQ")));
-    let input_r = row(r.input, 16.0);
-    match (kind, instrument) {
-        (Some(TrackKind::Instrument | TrackKind::Drummer), Some(inst)) => {
-            slot(g, input_r, inst, plug, plug_text)
+    // A VCA strip is a fader with Mute and Solo: none of the channel strip's slots.
+    let vca_strip = kind == Some(TrackKind::Vca);
+    if vca_strip {
+        g.text(
+            pos2(strip.center().x, r.setting + 8.0),
+            Align2::CENTER_CENTER,
+            tr("VCA"),
+            FontId::proportional(12.0),
+            TEXT_DIM,
+        );
+    }
+    if !vca_strip {
+        slot(g, row(r.setting, 16.0), tr("Setting"), SLOT_GRAY, TEXT);
+        g.rect_filled(row(r.gain_red + 1.0, 6.0), 1.0, SLOT_EMPTY);
+        eq_thumb(g, row(r.eq, 24.0), inserts.iter().any(|x| x.contains("EQ")));
+        let input_r = row(r.input, 16.0);
+        match (kind, instrument) {
+            (Some(TrackKind::Instrument | TrackKind::Drummer), Some(inst)) => {
+                slot(g, input_r, inst, plug, plug_text)
+            }
+            // An aux strip's input is the bus it listens to: Aux 1 takes Bus 1, and so on. (The
+            // engine does not route buses yet, so this is the strip's setting, not a signal path.)
+            (Some(TrackKind::Aux), _) => {
+                let n = match key {
+                    StripKey::Track(i) => p.tracks[..=i]
+                        .iter()
+                        .filter(|t| t.kind == TrackKind::Aux)
+                        .count(),
+                    _ => 1,
+                };
+                slot(g, input_r, &trf("Bus {}", &[&n]), plug, plug_text);
+            }
+            // An external MIDI strip shows where its notes go: the port and the channel.
+            (Some(TrackKind::ExternalMidi), _) => {
+                let text = match key {
+                    StripKey::Track(i) => {
+                        let t = &p.tracks[i];
+                        let port = t
+                            .midi_port
+                            .clone()
+                            .unwrap_or_else(|| tr("No Port").to_string());
+                        format!("{port} · {}", t.midi_channel)
+                    }
+                    _ => String::new(),
+                };
+                let fitted = elide(g, &text, &FontId::proportional(10.5), input_r.width() - 8.0);
+                slot(g, input_r, &fitted, plug, plug_text);
+            }
+            (Some(TrackKind::Audio), _) => {
+                slot(g, input_r, &trf("Input {}", &[&1]), SLOT_GRAY, TEXT);
+                g.circle_stroke(
+                    pos2(input_r.left() + 8.0, input_r.center().y),
+                    3.5,
+                    stroke(TEXT),
+                );
+            }
+            _ => slot(g, input_r, "", SLOT_EMPTY, TEXT),
         }
-        // An aux strip's input is the bus it listens to: Aux 1 takes Bus 1, and so on. (The
-        // engine does not route buses yet, so this is the strip's setting, not a signal path.)
-        (Some(TrackKind::Aux), _) => {
-            let n = match key {
-                StripKey::Track(i) => p.tracks[..=i]
-                    .iter()
-                    .filter(|t| t.kind == TrackKind::Aux)
-                    .count(),
-                _ => 1,
+        for k in 0..r.fx_rows {
+            let rr = row(r.fx + k as f32 * 17.0, 15.0);
+            match inserts.get(k) {
+                Some(fx) => slot(g, rr, fx, plug, plug_text),
+                None if k == inserts.len() => slot(g, rr, "", SLOT_EMPTY, TEXT),
+                None => {}
+            }
+        }
+        match key {
+            StripKey::Track(i) => send_slot(
+                ui,
+                g,
+                row(r.sends, 16.0),
+                &mut p.tracks[i].send,
+                id(ns, (key, "send")),
+                inactive,
+            ),
+            StripKey::StereoOut => slot(g, row(r.sends, 16.0), "", SLOT_EMPTY, TEXT),
+            StripKey::Master => {}
+        }
+        if let StripKey::Track(_) = key {
+            let out = if name_style == NameStyle::Plain {
+                tr("Stereo Out")
+            } else {
+                tr("St Out")
             };
-            slot(g, input_r, &trf("Bus {}", &[&n]), plug, plug_text);
+            slot(g, row(r.output, 16.0), out, SLOT_GRAY, TEXT);
+            if let StripKey::Track(i) = key {
+                vca_slot(ui, g, row(r.group, 16.0), p, i, id(ns, (key, "vca")));
+            }
         }
-        (Some(TrackKind::Audio), _) => {
-            slot(g, input_r, &trf("Input {}", &[&1]), SLOT_GRAY, TEXT);
-            g.circle_stroke(
-                pos2(input_r.left() + 8.0, input_r.center().y),
-                3.5,
-                stroke(TEXT),
+        if matches!(key, StripKey::StereoOut | StripKey::Master) {
+            let rr = row(r.automation, 16.0);
+            slot(
+                g,
+                rr,
+                tr("Read"),
+                SLOT_EMPTY,
+                Color32::from_rgb(0xa8, 0x9c, 0xf2),
+            );
+            g.rect_stroke(
+                rr,
+                3.0,
+                Stroke::new(1.0, Color32::from_rgb(0x6a, 0x5a, 0xc0)),
+                StrokeKind::Inside,
+            );
+        } else {
+            slot(
+                g,
+                row(r.automation, 16.0),
+                tr("Read"),
+                SLOT_EMPTY,
+                READ_GREEN,
             );
         }
-        _ => slot(g, input_r, "", SLOT_EMPTY, TEXT),
     }
-    for k in 0..r.fx_rows {
-        let rr = row(r.fx + k as f32 * 17.0, 15.0);
-        match inserts.get(k) {
-            Some(fx) => slot(g, rr, fx, plug, plug_text),
-            None if k == inserts.len() => slot(g, rr, "", SLOT_EMPTY, TEXT),
-            None => {}
-        }
-    }
-    match key {
-        StripKey::Track(i) => send_slot(
-            ui,
-            g,
-            row(r.sends, 16.0),
-            &mut p.tracks[i].send,
-            id(ns, (key, "send")),
-            inactive,
-        ),
-        StripKey::StereoOut => slot(g, row(r.sends, 16.0), "", SLOT_EMPTY, TEXT),
-        StripKey::Master => {}
-    }
-    if let StripKey::Track(_) = key {
-        let out = if name_style == NameStyle::Plain {
-            tr("Stereo Out")
-        } else {
-            tr("St Out")
-        };
-        slot(g, row(r.output, 16.0), out, SLOT_GRAY, TEXT);
-        slot(g, row(r.group, 16.0), "", SLOT_EMPTY, TEXT);
-    }
-    if matches!(key, StripKey::StereoOut | StripKey::Master) {
-        let rr = row(r.automation, 16.0);
-        slot(
-            g,
-            rr,
-            tr("Read"),
-            SLOT_EMPTY,
-            Color32::from_rgb(0xa8, 0x9c, 0xf2),
-        );
-        g.rect_stroke(
-            rr,
-            3.0,
-            Stroke::new(1.0, Color32::from_rgb(0x6a, 0x5a, 0xc0)),
-            StrokeKind::Inside,
-        );
-    } else {
-        slot(
-            g,
-            row(r.automation, 16.0),
-            tr("Read"),
-            SLOT_EMPTY,
-            READ_GREEN,
-        );
-    }
-
     let pan_c = pos2(strip.center().x, r.pan + 12.0);
     match key {
+        _ if vca_strip => {}
         StripKey::Track(i) => pan_knob(
             ui,
             g,
@@ -923,6 +954,55 @@ pub fn channel_strip(
             Stroke::new(1.0, Color32::from_gray(0x8a)),
             StrokeKind::Inside,
         );
+    }
+}
+
+/// The strip's Group slot: which VCA track moves this track's level (empty for none). Click
+/// to pick one of the project's VCA tracks.
+fn vca_slot(ui: &Ui, g: &Painter, r: Rect, p: &mut Project, i: usize, id: egui::Id) {
+    let name = p.vca_of(i).map(|v| v.name.clone()).unwrap_or_default();
+    let fill = if name.is_empty() {
+        SLOT_EMPTY
+    } else {
+        SLOT_GRAY
+    };
+    slot(
+        g,
+        r,
+        &elide(g, &name, &FontId::proportional(10.5), r.width() - 8.0),
+        fill,
+        TEXT,
+    );
+    let vcas: Vec<(usize, String)> = p
+        .tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.kind == TrackKind::Vca)
+        .map(|(j, t)| (j, t.name.clone()))
+        .collect();
+    if vcas.is_empty() {
+        return;
+    }
+    let resp = ui.interact(r, id, Sense::click());
+    let current = p.tracks[i].vca;
+    let mut picked = None;
+    egui::Popup::menu(&resp).show(|ui| {
+        if ui
+            .selectable_label(current.is_none(), tr("No VCA"))
+            .clicked()
+        {
+            picked = Some(None);
+            ui.close();
+        }
+        for (j, name) in &vcas {
+            if ui.selectable_label(current == Some(*j), name).clicked() {
+                picked = Some(Some(*j));
+                ui.close();
+            }
+        }
+    });
+    if let Some(vca) = picked {
+        p.assign_vca(i, vca);
     }
 }
 
@@ -1170,6 +1250,8 @@ fn strip_visible(kind: TrackKind, filters: &[bool; 8]) -> bool {
         TrackKind::Aux => filters[2],
         TrackKind::Bus => filters[3],
         TrackKind::Output => filters[5],
+        TrackKind::Vca => filters[6],
+        TrackKind::ExternalMidi => filters[7],
         // A folder is only a way to group tracks; it has no channel strip.
         TrackKind::Folder => false,
     }

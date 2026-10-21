@@ -30,6 +30,7 @@ fn render(chunk: usize) -> f64 {
     let (gtx, _grx) = rtrb::RingBuffer::new(8);
     let shared = Arc::new(Shared::new());
     let mut core = EngineCore::new(48_000, rx, gtx, shared.clone());
+    let mut state = core.take_state_reader().expect("state reader");
     for cmd in [
         Command::SetTempoMap(Box::new(map)),
         Command::SetPosition { beat: start },
@@ -50,7 +51,7 @@ fn render(chunk: usize) -> f64 {
         assert!(output[..n * 2].iter().all(|s| *s == 0.0));
         remaining -= n;
     }
-    let actual = shared.position();
+    let actual = state.read().position_beats;
     assert!(
         (actual - expected).abs() < 1e-8,
         "cycle drift: actual={actual}, expected={expected}"

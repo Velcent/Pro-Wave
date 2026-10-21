@@ -28,7 +28,7 @@ fn main() {
                     end_beat: i as f64 * 0.5 + 2.0,
                     pitch: 40 + (t * 3 + k * 4 + (i % 7) as u8) % 48,
                     vel: 100,
-                    track: t,
+                    track: t as u16,
                 });
             }
         }
@@ -80,7 +80,10 @@ fn main() {
         } else {
             synth
         };
-        let _ = tx.push(Command::SetTrackPatch { track: t, patch });
+        let _ = tx.push(Command::SetTrackPatch {
+            track: t as u16,
+            patch,
+        });
     }
 
     let mut buf = vec![0f32; BLOCK * 2];

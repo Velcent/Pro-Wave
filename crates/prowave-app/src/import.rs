@@ -10,7 +10,7 @@ pub fn is_audio_path(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         matches!(
             e.to_ascii_lowercase().as_str(),
-            "wav" | "wave" | "aif" | "aiff" | "aifc" | "flac"
+            "wav" | "wave" | "aif" | "aiff" | "aifc" | "flac" | "mp3" | "caf"
         )
     })
 }
@@ -35,12 +35,12 @@ pub fn audio_region(file: AudioFile, ctx: &egui::Context) -> AudioRegion {
 /// Adds a new audio track with one region starting at the bar under the playhead.
 pub fn import_audio(p: &mut Project, path: &Path, ctx: &egui::Context) -> Result<(), AudioError> {
     let file = AudioFile::open(path)?;
-    let beats_per_bar = p.beats_per_bar();
-    let start_bar = (p.position_beats / beats_per_bar).floor() + 1.0;
+    let start_bar = p.beats_to_bar(p.position_beats).floor() + 1.0;
     // The region's length follows the Tempo track from where it starts.
     let map = p.tempo_map();
-    let start = (start_bar - 1.0) * beats_per_bar;
-    let len_bars = (map.advance(start, file.duration_secs()) - start) / beats_per_bar;
+    let start = p.bar_to_beats(start_bar - 1.0);
+    let end = map.advance(start, file.duration_secs());
+    let len_bars = p.beats_to_bar(end) - (start_bar - 1.0);
     let name = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -66,6 +66,7 @@ pub fn import_audio(p: &mut Project, path: &Path, ctx: &egui::Context) -> Result
             notes: vec![],
             controls: Vec::new(),
             folder: None,
+            generated: None,
             audio: Some(audio_region(file, ctx)),
             params: RegionParams::default(),
         }],
@@ -75,6 +76,10 @@ pub fn import_audio(p: &mut Project, path: &Path, ctx: &egui::Context) -> Result
         height: 1.0,
         indent: 0,
         folded: false,
+        vca: None,
+        midi_port: None,
+        midi_channel: 1,
+        midi_fx: Vec::new(),
     });
     p.selected_track = p.tracks.len() - 1;
     p.song_rev += 1;

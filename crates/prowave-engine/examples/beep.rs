@@ -50,10 +50,11 @@ fn main() {
     engine.send(Command::SetTestTone { hz: 0.0, gain: 0.0 });
     std::thread::sleep(Duration::from_millis(50));
 
+    let state = *engine.state();
     let s = engine.shared();
-    let frames = s.block_frames.load(Ordering::Relaxed);
+    let frames = state.block_frames;
     let block_ms = frames as f64 * 1000.0 / engine.sample_rate().max(1) as f64;
-    let device_ms = s.output_latency_us.load(Ordering::Relaxed) as f64 / 1000.0;
+    let device_ms = state.output_latency_us as f64 / 1000.0;
     // When the backend reports no timestamps, fall back to one buffer of latency.
     let out_ms = if device_ms > 0.0 { device_ms } else { block_ms };
     println!("callback:    {frames} frames ({block_ms:.2} ms)");

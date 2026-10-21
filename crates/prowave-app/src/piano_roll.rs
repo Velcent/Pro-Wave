@@ -35,7 +35,7 @@ const ROW_WHITE: Color32 = Color32::from_rgb(26, 26, 26);
 const ROW_BLACK: Color32 = Color32::from_rgb(20, 20, 20);
 const NOTE_SEL: Color32 = Color32::from_rgb(0xe4, 0xff, 0xb0);
 /// Logic's velocity colours for a note: green when soft, yellow, then red when hard.
-fn velocity_color(vel: u8) -> Color32 {
+pub(crate) fn velocity_color(vel: u8) -> Color32 {
     let t = (vel as f32 / 127.0).clamp(0.0, 1.0);
     let green = Color32::from_rgb(60, 185, 70);
     let yellow = Color32::from_rgb(232, 200, 40);
@@ -60,7 +60,7 @@ fn region_bar_color(c: Color32) -> Color32 {
 /// Live notes the Piano Roll wants to play; `main` forwards them to the engine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Audition {
-    On { pitch: u8, vel: u8, track: u8 },
+    On { pitch: u8, vel: u8, track: u16 },
     Off { pitch: u8 },
 }
 
@@ -144,7 +144,13 @@ impl Default for PianoView {
 }
 
 /// Starts, switches or stops the audition note; `pitch = None` releases.
-fn audition(out: &mut Vec<Audition>, held: &mut Option<u8>, pitch: Option<u8>, vel: u8, track: u8) {
+fn audition(
+    out: &mut Vec<Audition>,
+    held: &mut Option<u8>,
+    pitch: Option<u8>,
+    vel: u8,
+    track: u16,
+) {
     if *held == pitch {
         return;
     }
@@ -155,6 +161,16 @@ fn audition(out: &mut Vec<Audition>, held: &mut Option<u8>, pitch: Option<u8>, v
         out.push(Audition::On { pitch, vel, track });
     }
     *held = pitch;
+}
+
+/// The bars that start between `from` and `to` (beats from the region's start `origin`), as
+/// (beats from `origin`, 0-based bar number).
+fn bar_starts(p: &Project, origin: f64, from: f32, to: f32) -> Vec<(f64, u32)> {
+    p.bars_in(origin + from as f64, origin + to as f64)
+        .into_iter()
+        .map(|b| (b.start - origin, b.bar0))
+        .filter(|(rel, _)| *rel >= from as f64 - 1e-9)
+        .collect()
 }
 
 /// Snap step in beats for the Piano Roll. Smart follows the zoom, like Logic's; when zoomed
@@ -185,7 +201,7 @@ fn c_label(pitch: i32) -> String {
 }
 
 /// The region the editor shows: the selected MIDI region, else the first one of the track.
-fn target_region(p: &Project, s: &UiState) -> Option<(usize, usize)> {
+pub(crate) fn target_region(p: &Project, s: &UiState) -> Option<(usize, usize)> {
     if let Some((t, r)) = s.tracks.selected {
         if p.tracks
             .get(t)
@@ -199,12 +215,16 @@ fn target_region(p: &Project, s: &UiState) -> Option<(usize, usize)> {
     (tr.kind != TrackKind::Audio && !tr.regions.is_empty()).then_some((t, 0))
 }
 
-fn tabs(g: &Painter, bar: Rect) {
+/// The editor tabs; the one for the region on show is lit, the rest are not there yet.
+/// Returns the tab clicked (the Piano Roll and the Score switch when `switch` allows).
+fn tabs(ui: &Ui, g: &Painter, bar: Rect, active: usize, switch: bool) -> Option<usize> {
+    let mut clicked = None;
     g.rect_filled(bar, 0.0, PANEL_BG);
     let tabs = [
         tr("Piano Roll"),
         tr("Score"),
         tr("Step Sequencer"),
+        tr("Drummer Editor"),
         tr("Smart Tempo"),
     ];
     let font = FontId::proportional(12.5);
@@ -216,7 +236,16 @@ fn tabs(g: &Painter, bar: Rect) {
     let mut x = bar.center().x - total / 2.0;
     for (i, (t, w)) in tabs.iter().zip(&widths).enumerate() {
         let r = Rect::from_min_size(pos2(x, bar.top() + 3.0), vec2(*w, TAB_H - 6.0));
-        if i == 0 {
+        if switch && i < 2 {
+            let resp = ui.interact(r, egui::Id::unique(("editor_tab", i)), Sense::click());
+            if resp.hovered() && i != active {
+                g.rect_filled(r, 4.0, Color32::from_white_alpha(14));
+            }
+            if resp.clicked() {
+                clicked = Some(i);
+            }
+        }
+        if i == active {
             g.rect_filled(r, 4.0, BLUE);
             g.text(
                 r.center(),
@@ -226,17 +255,19 @@ fn tabs(g: &Painter, bar: Rect) {
                 Color32::WHITE,
             );
         } else {
-            // These editors do not exist yet, so the tabs are dimmed and inert.
+            // The editors that are not there yet are dimmed and inert.
+            let live = switch && i < 2;
             g.text(
                 r.center(),
                 Align2::CENTER_CENTER,
                 *t,
                 font.clone(),
-                Color32::from_gray(0x7e),
+                if live { TEXT } else { Color32::from_gray(0x7e) },
             );
         }
         x += *w;
     }
+    clicked
 }
 
 struct Actions {
@@ -244,6 +275,8 @@ struct Actions {
     select_all: bool,
     quantize: bool,
     scale: bool,
+    /// Open the MIDI Transform window, with this preset (or as it was left).
+    transform: Option<Option<crate::transform::Preset>>,
     /// Whether there is something to undo / redo, and the one picked in the Edit menu.
     can_undo: bool,
     can_redo: bool,
@@ -321,15 +354,20 @@ fn toolbar(
             ui.close();
         }
         ui.separator();
-        for item in [
-            tr("Transpose…"),
-            tr("Legato"),
-            tr("Humanize…"),
-            tr("Fixed Velocity…"),
-            tr("Note Repeat…"),
+        use crate::transform::Preset;
+        for (label, preset) in [
+            (tr("MIDI Transform…"), None),
+            (tr("Transpose…"), Some(Preset::Transpose)),
+            (tr("Legato"), Some(Preset::Legato)),
+            (tr("Humanize…"), Some(Preset::Humanize)),
+            (tr("Fixed Velocity…"), Some(Preset::FixedVelocity)),
         ] {
-            todo_item(ui, item);
+            if ui.button(label).clicked() {
+                act.transform = Some(preset);
+                ui.close();
+            }
         }
+        todo_item(ui, tr("Note Repeat…"));
     });
     let (view, w) = menu_title(ui, &g, x, cy, tr("View"), uid("View"));
     x += w + 14.0;
@@ -465,7 +503,42 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let g = ui.painter_at(area);
     g.rect_filled(area, 0.0, PANEL_BG);
     let tab_bar = Rect::from_min_size(area.min, vec2(area.width(), TAB_H));
-    tabs(&g, tab_bar);
+    let region = target_region(p, s);
+    // A Pattern or Drummer region has its own editor.
+    let generated = region.and_then(|(t, r)| {
+        p.tracks[t].regions[r]
+            .generated
+            .as_ref()
+            .map(|g| matches!(g.source, crate::model::Generator::Drummer(_)))
+    });
+    // Ordinary MIDI regions can be shown as a score as well.
+    let ordinary =
+        region.is_some_and(|(t, r)| generated.is_none() && p.tracks[t].regions[r].folder.is_none());
+    let active = match generated {
+        None if ordinary && s.score_tab => 1,
+        None => 0,
+        Some(false) => 2,
+        Some(true) => 3,
+    };
+    if let Some(i) = tabs(ui, &g, tab_bar, active, ordinary) {
+        s.score_tab = i == 1;
+    }
+    if let (Some((ti, ri)), true) = (region, active == 1) {
+        s.piano_focus = ui
+            .input(|i| i.pointer.hover_pos())
+            .is_some_and(|pt| area.contains(pt));
+        let body = Rect::from_min_max(pos2(area.left(), tab_bar.bottom()), area.max);
+        crate::score::show(ui, p, s, ti, ri, body);
+        return;
+    }
+    if let (Some((ti, ri)), Some(_)) = (region, generated) {
+        s.piano_focus = ui
+            .input(|i| i.pointer.hover_pos())
+            .is_some_and(|pt| area.contains(pt));
+        let body = Rect::from_min_max(pos2(area.left(), tab_bar.bottom()), area.max);
+        crate::step_editor::show(ui, p, s, ti, ri, body);
+        return;
+    }
     let bar = Rect::from_min_size(
         pos2(area.left(), tab_bar.bottom()),
         vec2(area.width(), TOOLBAR_H),
@@ -476,13 +549,13 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         .is_some_and(|pt| area.contains(pt));
     s.piano_focus = hovered;
 
-    let region = target_region(p, s);
     let has_sel = !s.piano.selected.is_empty();
     let mut act = Actions {
         delete: false,
         select_all: false,
         quantize: false,
         scale: false,
+        transform: None,
         can_undo: s.can_undo,
         can_redo: s.can_redo,
         undo: None,
@@ -490,6 +563,9 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let mut snap = s.tracks.snap;
     toolbar(ui, bar, &mut s.piano, has_sel, &mut snap, &mut act);
     s.tracks.snap = snap;
+    if let Some(preset) = act.transform {
+        s.transform.open_with(preset);
+    }
     if act.undo.is_some() {
         s.undo_cmd = act.undo;
     }
@@ -515,14 +591,17 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         );
         return;
     }
-    let bpb = p.beats_per_bar();
+    let origin = p.region_start_beats(&p.tracks[ti].regions[ri]);
+    // The bar and beat length where the region starts (the grid draws every bar on its own).
+    let bpb = p.bar_len_at(origin);
+    let unit = p.beat_unit_at(origin);
     let (region_name, start_bar, len_beats) = {
         let r = &p.tracks[ti].regions[ri];
-        (r.name.clone(), r.start_bar, r.len_bars * bpb as f32)
+        (r.name.clone(), r.start_bar, p.region_len_beats(r) as f32)
     };
     let track_name = p.tracks[ti].name.clone();
     let region_color = region_bar_color(p.tracks[ti].color);
-    let position = p.position_beats - (start_bar as f64 - 1.0) * bpb;
+    let position = p.position_beats - origin;
 
     // Layout.
     let insp = Rect::from_min_size(body.min, vec2(INSPECTOR_W, body.height()));
@@ -574,7 +653,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             }
         }
     }
-    let track_u8 = ti.min(u8::MAX as usize) as u8;
+    let track_u8 = ti.min(u16::MAX as usize) as u16;
     let notes_len = p.tracks[ti].regions[ri].notes.len();
     v.selected.retain(|i| *i < notes_len);
 
@@ -678,7 +757,13 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let beat_at = |x: f32| (x - grid.left() + scroll_x) / beat_px;
     let pitch_at =
         |y: f32| (127 - ((y - grid.top() + scroll_y) / key_h).floor() as i32).clamp(0, 127);
-    let step = piano_step(s.tracks.snap, beat_px, bpb, p.beat_unit());
+    let step = piano_step(s.tracks.snap, beat_px, bpb, unit);
+    let bars = bar_starts(
+        p,
+        origin,
+        scroll_x / beat_px,
+        (scroll_x + grid.width()) / beat_px,
+    );
 
     // ---- Grid background
     let gg = ui.painter_at(grid);
@@ -709,10 +794,9 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let sub = (step < 1.0 && step * beat_px >= 8.0).then_some(step);
     for b in first..=last {
         let bx = x_of(b as f32);
-        let is_bar = (b as f64 % bpb).abs() < 1e-9;
         gg.line_segment(
             [pos2(bx, grid.top()), pos2(bx, grid.bottom())],
-            Stroke::new(1.0, Color32::from_gray(if is_bar { 0x58 } else { 0x3a })),
+            Stroke::new(1.0, Color32::from_gray(0x3a)),
         );
         if let Some(st) = sub {
             let mut k = st;
@@ -725,6 +809,13 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
                 k += st;
             }
         }
+    }
+    for &(rel, _) in &bars {
+        let bx = x_of(rel as f32);
+        gg.line_segment(
+            [pos2(bx, grid.top()), pos2(bx, grid.bottom())],
+            Stroke::new(1.0, Color32::from_gray(0x58)),
+        );
     }
     // Outside the region: dim.
     let (rx0, rx1) = (x_of(0.0), x_of(len_beats));
@@ -1423,14 +1514,12 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             Stroke::new(1.0, Color32::from_gray(0x36)),
         );
     }
-    for b in first..=last {
-        if (b as f64 % bpb).abs() < 1e-9 {
-            let bx = x_of(b as f32);
-            gv.line_segment(
-                [pos2(bx, vel_rect.top()), pos2(bx, vel_rect.bottom())],
-                Stroke::new(1.0, Color32::from_gray(0x44)),
-            );
-        }
+    for &(rel, _) in &bars {
+        let bx = x_of(rel as f32);
+        gv.line_segment(
+            [pos2(bx, vel_rect.top()), pos2(bx, vel_rect.bottom())],
+            Stroke::new(1.0, Color32::from_gray(0x44)),
+        );
     }
     for (i, n) in p.tracks[ti].regions[ri].notes.iter().enumerate() {
         let x = x_of(n.start);
@@ -1482,21 +1571,17 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         .into_iter()
         .find(|n| *n as f32 * bpb as f32 * beat_px >= 36.0)
         .unwrap_or(32);
-    for b in first..=last {
-        if (b as f64 % bpb).abs() > 1e-9 {
-            continue;
-        }
-        let bar_idx = (b as f64 / bpb) as i32;
-        let x = x_of(b as f32);
+    for &(rel, bar0) in &bars {
+        let x = x_of(rel as f32);
         gr.line_segment(
             [pos2(x, ruler.top() + 3.0), pos2(x, ruler.bottom())],
             Stroke::new(1.0, Color32::from_gray(0x78)),
         );
-        if bar_idx % label_every == 0 {
+        if (bar0 as i32 - (start_bar as i32 - 1)) % label_every == 0 {
             gr.text(
                 pos2(x + 3.0, ruler.top() + 4.0),
                 Align2::LEFT_TOP,
-                format!("{}", start_bar as i32 + bar_idx),
+                format!("{}", bar0 + 1),
                 FontId::proportional(11.0),
                 TEXT,
             );

@@ -1,7 +1,10 @@
 //! Bridges the UI project model to `prowave-engine` using only `Command`s (never direct mutation).
+use crate::model::TrackKind;
 use crate::model::{Project, Region, TempoPoint, Track};
 use crate::patches::synth_patch;
-use prowave_engine::{Command, Engine, NoteEvent, Song, SynthPatch, TrackMix, MAX_TRACKS};
+use prowave_engine::{
+    Command, ControlEvent, Engine, NoteEvent, Song, SynthPatch, TrackMix, MAX_TRACKS,
+};
 
 #[derive(Clone, Copy, PartialEq)]
 struct Mix {
@@ -18,7 +21,7 @@ pub struct EngineSync {
     pub engine: Engine,
     playing: bool,
     /// Tempo, tempo changes and signature last sent.
-    tempo: Option<(f32, Vec<TempoPoint>, (u8, u8))>,
+    tempo: Option<TempoKey>,
     metronome: bool,
     cycle: (bool, f64, f64),
     master: Option<f32>,
@@ -26,6 +29,12 @@ pub struct EngineSync {
     mixes: Vec<Mix>,
     /// Last synth patch sent for each track (re-sent whenever the Library changes it).
     patches: Vec<SynthPatch>,
+    /// Which tracks the engine was told are external, by track.
+    externals: Vec<bool>,
+    /// The controller changes the engine has.
+    controls: Vec<ControlEvent>,
+    /// MIDI Time Code as the engine was last told: on, frame rate, project start in frames.
+    mtc: Option<(bool, prowave_engine::SmpteRate, i64)>,
     song_rev: Option<u64>,
     /// Audio layout of the song last sent with `SetSong`.
     layout: Option<AudioLayout>,
@@ -35,27 +44,45 @@ pub struct EngineSync {
 
 /// Engine track number for UI track `i`. Tracks past the engine's `MAX_TRACKS` have none:
 /// they are left out of the song (silent) instead of being folded onto the last track.
-fn track_index(i: usize) -> Option<u8> {
-    (i < MAX_TRACKS).then_some(i as u8)
+fn track_index(i: usize) -> Option<u16> {
+    (i < MAX_TRACKS).then_some(i as u16)
+}
+
+/// The mix the engine plays track `i` with: its fader and its VCA's, Mute and Solo from the
+/// track or its VCA.
+fn mix_of(p: &Project, i: usize) -> Mix {
+    let (gain_db, mute, solo) = p.track_mix_of(i);
+    Mix {
+        gain_db,
+        mute,
+        solo,
+        pan: p.tracks[i].pan,
+    }
+}
+
+/// Every track's mix as an engine song carries it.
+fn track_mixes(p: &Project) -> Vec<TrackMix> {
+    mixes(p)
+        .into_iter()
+        .map(|m| TrackMix {
+            gain_db: m.gain_db,
+            mute: m.mute,
+            solo: m.solo,
+            pan: m.pan,
+        })
+        .collect()
 }
 
 fn mixes(p: &Project) -> Vec<Mix> {
-    p.tracks
-        .iter()
-        .take(MAX_TRACKS)
-        .map(|t| Mix {
-            gain_db: t.volume_db,
-            mute: t.mute,
-            solo: t.solo,
-            pan: t.pan,
-        })
+    (0..p.tracks.len().min(MAX_TRACKS))
+        .map(|i| mix_of(p, i))
         .collect()
 }
 
 /// Notes of one MIDI region as the engine should play them, with the Region Inspector
 /// (quantize, transpose, velocity) and Track Inspector (transpose, velocity, key and
 /// velocity limits) applied non-destructively, as Logic does on playback.
-fn region_notes(t: &Track, r: &Region, origin: f64, track: u8) -> Vec<NoteEvent> {
+pub(crate) fn region_notes(t: &Track, r: &Region, origin: f64, track: u16) -> Vec<NoteEvent> {
     let (rp, tp) = (r.params, t.params);
     r.notes
         .iter()
@@ -81,8 +108,7 @@ fn region_notes(t: &Track, r: &Region, origin: f64, track: u8) -> Vec<NoteEvent>
 
 /// Every unmuted region on an engine track, with its engine track number and start beat
 /// (quarter notes, as the engine counts them).
-fn playing_regions(p: &Project) -> impl Iterator<Item = (u8, &Track, &Region, f64)> {
-    let beats_per_bar = p.beats_per_bar();
+fn playing_regions(p: &Project) -> impl Iterator<Item = (u16, &Track, &Region, f64)> {
     p.tracks
         .iter()
         .enumerate()
@@ -91,13 +117,67 @@ fn playing_regions(p: &Project) -> impl Iterator<Item = (u8, &Track, &Region, f6
             t.regions
                 .iter()
                 .filter(|r| !r.params.mute)
-                .map(move |r| (track, t, r, (r.start_bar as f64 - 1.0) * beats_per_bar))
+                .map(move |r| (track, t, r, p.region_start_beats(r)))
         })
 }
 
+/// The controller changes external instruments get: those recorded in the regions of External
+/// MIDI tracks (the sustain pedal among them), at their place on the timeline.
+fn song_controls(p: &Project) -> Vec<ControlEvent> {
+    p.tracks
+        .iter()
+        .enumerate()
+        .filter_map(|(ti, t)| Some((track_index(ti)?, t)))
+        .filter(|(_, t)| t.kind == TrackKind::ExternalMidi)
+        .flat_map(|(track, t)| {
+            let mut out = Vec::new();
+            let (mut from, mut to) = (f64::MAX, 0.0f64);
+            for r in t.regions.iter().filter(|r| !r.params.mute) {
+                let origin = p.region_start_beats(r);
+                from = from.min(origin);
+                to = to.max(p.region_end_beats(r));
+                out.extend(r.controls.iter().map(|c| ControlEvent {
+                    beat: origin + f64::from(c.start),
+                    track,
+                    number: c.num.min(127),
+                    value: c.val.min(127),
+                }));
+            }
+            // A Modulator on the track sends its controller along all the regions.
+            out.extend(
+                crate::midi_fx::controls(&t.midi_fx, from, to)
+                    .into_iter()
+                    .map(|m| ControlEvent {
+                        beat: m.beat,
+                        track,
+                        number: m.number,
+                        value: m.value,
+                    }),
+            );
+            out
+        })
+        .collect()
+}
+
 fn song_notes(p: &Project) -> Vec<NoteEvent> {
-    playing_regions(p)
-        .flat_map(|(track, t, r, origin)| region_notes(t, r, origin, track))
+    p.tracks
+        .iter()
+        .enumerate()
+        .filter_map(|(ti, t)| Some((track_index(ti)?, t)))
+        .flat_map(|(track, t)| {
+            let notes: Vec<NoteEvent> = t
+                .regions
+                .iter()
+                .filter(|r| !r.params.mute)
+                .flat_map(|r| region_notes(t, r, p.region_start_beats(r), track))
+                .collect();
+            // The track's MIDI FX change what it plays.
+            if t.midi_fx.iter().any(|s| s.on) {
+                crate::midi_fx::apply(&t.midi_fx, notes)
+            } else {
+                notes
+            }
+        })
         .collect()
 }
 
@@ -107,17 +187,28 @@ fn song_notes(p: &Project) -> Vec<NoteEvent> {
 #[derive(PartialEq, Default, Debug)]
 struct AudioLayout {
     tracks: usize,
-    clips: Vec<(std::path::PathBuf, u8, u64, String)>,
+    clips: Vec<(std::path::PathBuf, u16, u64, String)>,
+}
+
+/// The edits of region `r` of track `t`: its own gain, fades and reverse, with the fades
+/// lengthened where it crossfades with another region.
+fn clip_edit(p: &Project, t: &Track, r: &Region) -> prowave_engine::ClipEdit {
+    let ti = p.tracks.iter().position(|x| std::ptr::eq(x, t));
+    let ri = t.regions.iter().position(|x| std::ptr::eq(x, r));
+    match (ti, ri) {
+        (Some(ti), Some(ri)) => p.clip_edit_of(ti, ri),
+        _ => r.params.clip_edit(),
+    }
 }
 
 fn audio_layout(p: &Project) -> AudioLayout {
     AudioLayout {
         tracks: p.tracks.len(),
         clips: playing_regions(p)
-            .filter_map(|(track, _, r, origin)| {
+            .filter_map(|(track, t, r, origin)| {
                 let a = r.audio.as_ref()?;
                 // Gain, fades and reverse are set when a clip starts streaming.
-                let edit = format!("{:?}", r.params.clip_edit());
+                let edit = format!("{:?}", clip_edit(p, t, r));
                 Some((a.file.path.clone(), track, origin.to_bits(), edit))
             })
             .collect(),
@@ -130,41 +221,20 @@ fn build_song(engine: &Engine, p: &Project) -> Song {
         .filter(|(_, _, r, _)| r.audio.is_some())
         .count();
     let clips = playing_regions(p)
-        .filter_map(|(track, _, r, origin)| {
+        .filter_map(|(track, t, r, origin)| {
             let a = r.audio.as_ref()?;
-            Some(engine.stream_clip_in(&a.file, track, origin, r.params.clip_edit(), streamed))
+            Some(engine.stream_clip_in(&a.file, track, origin, clip_edit(p, t, r), streamed))
         })
         .collect();
     let notes = song_notes(p);
-    let tracks = p
-        .tracks
-        .iter()
-        .take(MAX_TRACKS)
-        .map(|t| TrackMix {
-            gain_db: t.volume_db,
-            mute: t.mute,
-            solo: t.solo,
-            pan: t.pan,
-        })
-        .collect();
+    let tracks = track_mixes(p);
     Song::new(notes, tracks).with_clips(clips)
 }
 
 /// The project's MIDI as an engine song, without audio regions (which need a running
 /// `Engine` to stream). Used by the offline benchmark.
 pub fn offline_song(p: &Project) -> Song {
-    let tracks = p
-        .tracks
-        .iter()
-        .take(MAX_TRACKS)
-        .map(|t| TrackMix {
-            gain_db: t.volume_db,
-            mute: t.mute,
-            solo: t.solo,
-            pan: t.pan,
-        })
-        .collect();
-    Song::new(song_notes(p), tracks)
+    Song::new(song_notes(p), track_mixes(p))
 }
 
 /// The project's Tempo track and time signature as an engine tempo map.
@@ -172,8 +242,12 @@ fn tempo_map(p: &Project) -> Command {
     Command::SetTempoMap(Box::new(p.tempo_map()))
 }
 
-fn tempo_key(p: &Project) -> (f32, Vec<TempoPoint>, (u8, u8)) {
-    (p.tempo, p.tempo_changes.clone(), p.sig)
+/// What the engine's tempo map depends on: the start tempo, the tempo changes, the first
+/// signature and the signature changes.
+type TempoKey = (f32, Vec<TempoPoint>, (u8, u8), Vec<crate::model::SigChange>);
+
+fn tempo_key(p: &Project) -> TempoKey {
+    (p.tempo, p.tempo_points(), p.sig, p.sig_changes.clone())
 }
 
 impl EngineSync {
@@ -188,6 +262,9 @@ impl EngineSync {
             position: None,
             mixes: Vec::new(),
             patches: Vec::new(),
+            externals: Vec::new(),
+            controls: Vec::new(),
+            mtc: None,
             song_rev: None,
             layout: None,
             retry: false,
@@ -203,7 +280,7 @@ impl EngineSync {
         // (then the UI keeps the requested position and `push` retries it).
         if seek_done {
             if p.playing {
-                p.position_beats = self.engine.shared().position();
+                p.position_beats = self.engine.state().position_beats;
             }
             self.position = Some(p.position_beats);
         }
@@ -225,12 +302,21 @@ impl EngineSync {
                 if sent {
                     self.mixes = mixes(p);
                     self.layout = Some(layout);
+                    // The new song has no controllers yet: they follow below.
+                    self.controls.clear();
                 }
                 sent
             };
             if sent {
                 self.song_rev = Some(p.song_rev);
             }
+        }
+        let controls = song_controls(p);
+        if self.song_rev == Some(p.song_rev)
+            && controls != self.controls
+            && self.send(Command::set_controls(controls.clone()))
+        {
+            self.controls = controls;
         }
         // The user moved the playhead (ruler drag, rewind buttons, menu).
         let seek_done = match self.position {
@@ -251,6 +337,16 @@ impl EngineSync {
         let key = tempo_key(p);
         if self.tempo.as_ref() != Some(&key) && self.send(tempo_map(p)) {
             self.tempo = Some(key);
+        }
+        let mtc = (p.mtc_out.is_some(), p.smpte_rate, p.smpte_offset_frames());
+        if self.mtc != Some(mtc)
+            && self.send(Command::SetMtc {
+                on: mtc.0,
+                rate: mtc.1,
+                offset_frames: mtc.2,
+            })
+        {
+            self.mtc = Some(mtc);
         }
         if p.metronome != self.metronome && self.send(Command::SetMetronome { on: p.metronome }) {
             self.metronome = p.metronome;
@@ -279,7 +375,7 @@ impl EngineSync {
             if self.patches.get(i) == Some(&patch) {
                 continue;
             }
-            let track = i as u8;
+            let track = i as u16;
             if !self.send(Command::SetTrackPatch { track, patch }) {
                 break;
             }
@@ -289,15 +385,26 @@ impl EngineSync {
                 self.patches.push(patch);
             }
         }
+        // External MIDI tracks: their notes go out as MIDI instead of sounding here.
+        for (i, t) in p.tracks.iter().enumerate().take(MAX_TRACKS) {
+            let external = t.kind == TrackKind::ExternalMidi;
+            if self.externals.get(i).copied().unwrap_or(false) == external {
+                continue;
+            }
+            if !self.send(Command::SetTrackExternal {
+                track: i as u16,
+                external,
+            }) {
+                break;
+            }
+            self.externals
+                .resize(self.externals.len().max(i + 1), false);
+            self.externals[i] = external;
+        }
         // Mixer moves. Until a song is accepted, its `SetSong` carries the mix instead.
         if self.layout.is_some() {
-            for (i, t) in p.tracks.iter().enumerate().take(MAX_TRACKS) {
-                let m = Mix {
-                    gain_db: t.volume_db,
-                    mute: t.mute,
-                    solo: t.solo,
-                    pan: t.pan,
-                };
+            for i in 0..p.tracks.len().min(MAX_TRACKS) {
+                let m = mix_of(p, i);
                 if self.mixes.get(i) == Some(&m) {
                     continue;
                 }
@@ -308,7 +415,7 @@ impl EngineSync {
                     pan: m.pan,
                 };
                 if !self.send(Command::SetTrackMix {
-                    track: i as u8,
+                    track: i as u16,
                     mix,
                 }) {
                     break;
@@ -328,6 +435,16 @@ impl EngineSync {
         sent
     }
 
+    /// The MIDI the engine sends to external instruments (once).
+    pub fn take_midi_out(&mut self) -> Option<rtrb::Consumer<prowave_engine::MidiOutEvent>> {
+        self.engine.take_midi_out()
+    }
+
+    /// The MIDI Time Code the engine sends (once).
+    pub fn take_mtc_out(&mut self) -> Option<rtrb::Consumer<prowave_engine::MtcMessage>> {
+        self.engine.take_mtc_out()
+    }
+
     /// Whether a command was rejected (queue full) and is waiting to be retried.
     pub fn needs_retry(&self) -> bool {
         self.retry
@@ -341,10 +458,9 @@ impl EngineSync {
     }
 
     /// Post-fader stereo peaks for the first `n` tracks (linear), for the mixer meters.
-    pub fn track_meters(&self, n: usize) -> Vec<(f32, f32)> {
-        (0..n)
-            .map(|i| self.engine.shared().track_peaks(i))
-            .collect()
+    pub fn track_meters(&mut self, n: usize) -> Vec<(f32, f32)> {
+        let state = self.engine.state();
+        (0..n).map(|i| state.track_peaks(i)).collect()
     }
 
     /// Highest audio-callback DSP load since the last call (1.0 = full budget).
@@ -352,8 +468,8 @@ impl EngineSync {
         self.engine.shared().take_dsp_load()
     }
 
-    pub fn master_peaks(&self) -> (f32, f32) {
-        self.engine.shared().peaks()
+    pub fn master_peaks(&mut self) -> (f32, f32) {
+        self.engine.state().peaks
     }
 }
 
@@ -383,6 +499,7 @@ mod tests {
                 notes,
                 controls: Vec::new(),
                 folder: None,
+                generated: None,
                 audio: None,
                 params: RegionParams::default(),
             }],
@@ -392,6 +509,10 @@ mod tests {
             height: 1.0,
             indent: 0,
             folded: false,
+            vca: None,
+            midi_port: None,
+            midi_channel: 1,
+            midi_fx: Vec::new(),
         }
     }
 
@@ -460,7 +581,7 @@ mod tests {
         for (sig, quarters_per_bar) in [((4, 4), 4.0), ((6, 8), 3.0), ((7, 8), 3.5), ((2, 2), 4.0)]
         {
             p.sig = sig;
-            assert_eq!(p.beats_per_bar(), quarters_per_bar, "{sig:?}");
+            assert_eq!(p.bar_len(0), quarters_per_bar, "{sig:?}");
             let (_, _, _, origin) = playing_regions(&p).next().unwrap();
             // Bar 3 (1-based) is the engine's bar 2 (0-based).
             let engine_beat = TempoMap::constant(p.tempo, sig).beat_of_bar(2);
@@ -469,6 +590,100 @@ mod tests {
                 "{sig:?}: {origin} vs {engine_beat}"
             );
         }
+    }
+
+    #[test]
+    fn external_tracks_send_the_controllers_recorded_in_their_regions() {
+        use crate::model::{Control, TrackKind};
+        let mut p = Project::demo();
+        let ext = p.add_track(TrackKind::ExternalMidi);
+        let plain = p.add_track(TrackKind::Instrument);
+        for t in [ext, plain] {
+            p.tracks[t].regions.push(crate::model::Region {
+                name: "r".into(),
+                start_bar: 3.0,
+                len_bars: 2.0,
+                notes: vec![],
+                controls: vec![
+                    Control {
+                        start: 1.0,
+                        num: 64,
+                        val: 127,
+                    },
+                    Control {
+                        start: 2.0,
+                        num: 64,
+                        val: 0,
+                    },
+                    Control {
+                        start: 0.5,
+                        num: 1,
+                        val: 200,
+                    },
+                ],
+                folder: None,
+                audio: None,
+                params: RegionParams::default(),
+                generated: None,
+            });
+        }
+        let c = song_controls(&p);
+        assert_eq!(c.len(), 3, "only the External MIDI track: {c:?}");
+        assert!(c.iter().all(|e| e.track == ext as u16));
+        // Bar 3 starts at beat 8.
+        let mut beats: Vec<f64> = c.iter().map(|e| e.beat).collect();
+        beats.sort_by(f64::total_cmp);
+        assert_eq!(beats, [8.5, 9.0, 10.0]);
+        assert!(c.iter().all(|e| e.value <= 127), "wild values are repaired");
+        p.tracks[ext].regions[0].params.mute = true;
+        assert!(song_controls(&p).is_empty(), "a muted region sends nothing");
+    }
+
+    #[test]
+    fn a_tracks_midi_fx_change_the_notes_the_engine_gets() {
+        use crate::midi_fx::{FxSlot, MidiFx};
+        let mut p = Project::demo();
+        let plain = song_notes(&p);
+        p.tracks[0].midi_fx = vec![FxSlot {
+            fx: MidiFx::Transposer { semitones: 7 },
+            on: true,
+        }];
+        let fx = song_notes(&p);
+        assert_eq!(plain.len(), fx.len());
+        let first =
+            |notes: &[NoteEvent]| notes.iter().filter(|n| n.track == 0).map(|n| n.pitch).max();
+        assert_eq!(first(&fx), first(&plain).map(|x| x + 7));
+        // The other tracks are as they were.
+        let other = |notes: &[NoteEvent]| notes.iter().filter(|n| n.track == 1).count();
+        assert_eq!(other(&fx), other(&plain));
+        // Switched off, the notes are the original ones.
+        p.tracks[0].midi_fx[0].on = false;
+        assert_eq!(song_notes(&p).len(), plain.len());
+        assert_eq!(first(&song_notes(&p)), first(&plain));
+    }
+
+    #[test]
+    fn regions_and_the_engine_agree_on_bars_with_several_signatures() {
+        let mut p = Project::demo();
+        p.set_signature_from(3, (3, 4));
+        p.set_signature_from(5, (6, 8));
+        p.set_signature_from(7, (7, 8));
+        p.set_signature_from(10, (5, 4));
+        let map = p.tempo_map();
+        for bar in 0..14u32 {
+            let engine = map.beat_of_bar(bar);
+            let app = p.bar_to_beats(bar as f64);
+            assert!((engine - app).abs() < 1e-9, "bar {bar}: {engine} vs {app}");
+        }
+        for beats in [0.0, 3.9, 8.0, 12.5, 14.0, 20.0, 23.4, 30.0, 41.0] {
+            let pos = map.position(beats);
+            let bars = p.beats_to_bar(beats);
+            assert_eq!(pos.bar as f64, bars.floor(), "bar of {beats}");
+        }
+        // A change of signature is sent to the engine as a change of the tempo map.
+        let before = tempo_key(&p);
+        p.set_signature_from(12, (2, 4));
+        assert_ne!(tempo_key(&p), before);
     }
 
     #[test]
@@ -527,7 +742,7 @@ mod tests {
             "the last engine track must not collect notes from later tracks"
         );
         assert_eq!(mixes(&p).len(), MAX_TRACKS);
-        assert_eq!(track_index(MAX_TRACKS - 1), Some((MAX_TRACKS - 1) as u8));
+        assert_eq!(track_index(MAX_TRACKS - 1), Some((MAX_TRACKS - 1) as u16));
         assert_eq!(track_index(MAX_TRACKS), None);
     }
 

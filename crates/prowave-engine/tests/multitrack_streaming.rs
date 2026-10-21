@@ -63,12 +63,13 @@ fn streams_24_pcm24_tracks_without_dropouts() -> Result<(), Box<dyn std::error::
             (file.sample_rate, file.channels, file.frames),
             (RATE, 2, FILE_FRAMES as u64)
         );
-        clips.push(disk.stream(&file, RATE, track as u8, 0.0));
+        clips.push(disk.stream(&file, RATE, track as u16, 0.0));
     }
     let (mut tx, rx) = rtrb::RingBuffer::new(16);
     let (gtx, mut grx) = rtrb::RingBuffer::new(8);
     let shared = Arc::new(Shared::new());
     let mut core = EngineCore::new(RATE, rx, gtx, shared.clone());
+    let mut state = core.take_state_reader().expect("state reader");
     let song = Song::new(vec![], vec![TrackMix::default(); TRACKS]).with_clips(clips);
     assert!(tx.push(Command::SetSong(Box::new(song))).is_ok());
     assert!(tx.push(Command::SetMasterGain { linear: 1.0 }).is_ok());
@@ -120,6 +121,6 @@ fn streams_24_pcm24_tracks_without_dropouts() -> Result<(), Box<dyn std::error::
         max_error < 0.000001,
         "missing, duplicated, or corrupted audio samples"
     );
-    assert!((shared.position() - 120.0).abs() < 1e-6);
+    assert!((state.read().position_beats - 120.0).abs() < 1e-6);
     Ok(())
 }

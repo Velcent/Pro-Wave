@@ -2,24 +2,65 @@
 //! no allocation, no locks, no syscalls. Unit-testable without an audio device.
 use crate::disk::{Block, ClipShared};
 use crate::gain_smoothing::GainRamp;
+use crate::mtc::{MtcGenerator, MtcMessage};
 use crate::synth::{kit_voice, osc, Kit, Svf, SynthPatch};
-use crate::tempo_map::TempoMap;
+use crate::tempo_map::{SmpteRate, TempoMap};
+use crate::triple::{triple_buffer, Reader, Writer};
 use rtrb::{Consumer, Producer};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-pub const MAX_TRACKS: usize = 64;
+/// Tracks the engine mixes (Logic: 1000 tracks per project).
+pub const MAX_TRACKS: usize = 1024;
 const MAX_VOICES: usize = 48;
 
 /// A note scheduled on the timeline (beats are 0-based quarter notes).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NoteEvent {
     pub start_beat: f64,
     pub end_beat: f64,
     pub pitch: u8,
     pub vel: u8,
-    pub track: u8,
+    pub track: u16,
 }
+
+/// A MIDI note the engine sends out for a track that plays an external instrument (Logic:
+/// External MIDI track). The app turns it into a MIDI message on the track's port and channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MidiOutEvent {
+    pub track: u16,
+    /// Note On (`true`) or Note Off. Not used by a controller.
+    pub on: bool,
+    /// The note, or for a controller its number.
+    pub pitch: u8,
+    /// The velocity, or for a controller its value.
+    pub vel: u8,
+    /// A controller change (such as the sustain pedal) instead of a note.
+    pub controller: bool,
+}
+
+/// A controller change on a track's timeline (beats are 0-based quarter notes). Only tracks
+/// that play an external instrument send them (as [`MidiOutEvent`]s).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ControlEvent {
+    pub beat: f64,
+    pub track: u16,
+    pub number: u8,
+    pub value: u8,
+}
+
+/// A note sent to an external instrument that has not been released yet.
+#[derive(Clone, Copy)]
+struct ExtNote {
+    track: u16,
+    pitch: u8,
+    end_beat: f64,
+    /// Played from the keyboard: it ends on Note Off, not at `end_beat`.
+    live: bool,
+}
+
+/// External notes that can sound at once.
+const MAX_EXT_NOTES: usize = 512;
 
 #[derive(Clone, Copy, Debug)]
 pub struct TrackMix {
@@ -67,6 +108,8 @@ pub struct Song {
     pub tracks: Vec<TrackMix>,
     /// Streamed audio regions (create with `Engine::stream_clip`).
     pub clips: Vec<AudioClip>,
+    /// Controller changes for external instruments, sorted by beat (see [`Song::with_controls`]).
+    pub controls: Vec<ControlEvent>,
 }
 
 impl Song {
@@ -76,7 +119,15 @@ impl Song {
             notes,
             tracks,
             clips: Vec::new(),
+            controls: Vec::new(),
         }
+    }
+
+    /// The song with these controller changes (sorted here).
+    pub fn with_controls(mut self, mut controls: Vec<ControlEvent>) -> Self {
+        controls.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        self.controls = controls;
+        self
     }
 
     pub fn with_clips(mut self, clips: Vec<AudioClip>) -> Self {
@@ -88,7 +139,7 @@ impl Song {
 /// Audio-thread side of a streamed audio region (Logic Pro: audio region on an audio track).
 /// Reads [`Block`]s produced by the disk thread; never allocates or blocks.
 pub struct AudioClip {
-    pub track: u8,
+    pub track: u16,
     pub start_beat: f64,
     end_beat: f64,
     /// Length in device-rate frames.
@@ -161,7 +212,7 @@ impl ClipEdit {
 
 impl AudioClip {
     pub(crate) fn new(
-        track: u8,
+        track: u16,
         start_beat: f64,
         len_frames: u64,
         edit: ClipEdit,
@@ -293,7 +344,7 @@ pub enum Command {
     /// Track fader/pan (Logic: channel strip). Gain and pan ramp over 5 ms while sounding;
     /// mute and solo retain immediate switching. New song snapshots initialize immediately.
     SetTrackMix {
-        track: u8,
+        track: u16,
         mix: TrackMix,
     },
     SetSong(Box<Song>),
@@ -301,6 +352,9 @@ pub enum Command {
     /// Streamed audio clips keep playing and sounding voices are not cut, so MIDI edits while
     /// playing cause no audio dropout. Use `SetSong` when clips or the track count change.
     SetNotes(Vec<NoteEvent>),
+    /// Replaces the song's controller changes for external instruments (sorted by beat; build
+    /// with [`Command::set_controls`]).
+    SetControls(Vec<ControlEvent>),
     /// Logic Pro "Test Oscillator": a sine on the output, independent of the transport.
     /// `hz <= 0` turns it off.
     SetTestTone {
@@ -312,7 +366,7 @@ pub enum Command {
     NoteOn {
         pitch: u8,
         vel: u8,
-        track: u8,
+        track: u16,
     },
     /// Releases this live pitch on every track (legacy/global audition release).
     NoteOff {
@@ -322,12 +376,27 @@ pub enum Command {
     /// routing. Other tracks and timeline notes are unaffected; unknown tracks are ignored.
     NoteOffTrack {
         pitch: u8,
-        track: u8,
+        track: u16,
+    },
+    /// Makes `track` play an external instrument: its notes go out as [`MidiOutEvent`]s
+    /// instead of sounding in the engine.
+    SetTrackExternal {
+        track: u16,
+        external: bool,
     },
     /// Sets the synth patch used by instrument notes on `track` (Library patch).
     SetTrackPatch {
-        track: u8,
+        track: u16,
         patch: SynthPatch,
+    },
+    /// Turns MIDI Time Code output on or off (Logic: Synchronization > MTC). While on, the
+    /// engine sends the SMPTE time of the playhead as [`MtcMessage`]s: quarter frames while
+    /// playing, a full frame when the position jumps. `offset_frames` is the SMPTE time of the
+    /// project start, in frames.
+    SetMtc {
+        on: bool,
+        rate: SmpteRate,
+        offset_frames: i64,
     },
 }
 
@@ -335,8 +404,14 @@ impl Command {
     pub(crate) fn retires_state(&self) -> bool {
         matches!(
             self,
-            Self::SetSong(_) | Self::SetNotes(_) | Self::SetTempoMap(_)
+            Self::SetSong(_) | Self::SetNotes(_) | Self::SetControls(_) | Self::SetTempoMap(_)
         )
+    }
+
+    /// [`Command::SetControls`] with `controls` sorted as the engine requires.
+    pub fn set_controls(mut controls: Vec<ControlEvent>) -> Self {
+        controls.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        Command::SetControls(controls)
     }
 
     /// [`Command::SetNotes`] with `notes` sorted as the engine requires.
@@ -349,25 +424,63 @@ impl Command {
 pub enum Garbage {
     Song(Box<Song>),
     Notes(Vec<NoteEvent>),
+    Controls(Vec<ControlEvent>),
     TempoMap(Box<TempoMap>),
 }
 
-/// Engine -> UI state, all lock-free.
+/// What the engine shows the UI after each audio block: the playhead, the transport and the
+/// meters, all from the same block. Read with [`StateReader::read`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EngineState {
+    pub position_beats: f64,
+    pub playing: bool,
+    /// Master output peak (left, right), linear, falling back slowly like a meter.
+    pub peaks: (f32, f32),
+    /// Post-fader stereo peak per track, linear, for the mixer meters.
+    pub track_peaks: [(f32, f32); MAX_TRACKS],
+    /// Frames in the most recent device callback.
+    pub block_frames: u32,
+    /// Device-reported delay from callback to DAC, in microseconds (0 if unknown).
+    pub output_latency_us: u32,
+}
+
+impl Default for EngineState {
+    fn default() -> Self {
+        Self {
+            position_beats: 0.0,
+            playing: false,
+            peaks: (0.0, 0.0),
+            track_peaks: [(0.0, 0.0); MAX_TRACKS],
+            block_frames: 0,
+            output_latency_us: 0,
+        }
+    }
+}
+
+impl EngineState {
+    /// Post-fader (left, right) peak of `track`, linear; silence for a track out of range.
+    pub fn track_peaks(&self, track: usize) -> (f32, f32) {
+        self.track_peaks.get(track).copied().unwrap_or((0.0, 0.0))
+    }
+}
+
+/// UI side of the engine's state: the newest complete [`EngineState`], through a lock-free
+/// triple buffer (the audio thread never waits for the UI, and the UI never sees a value made
+/// of two different blocks).
+pub struct StateReader(Reader<EngineState>);
+
+impl StateReader {
+    /// The state after the newest audio block. Wait-free.
+    pub fn read(&mut self) -> &EngineState {
+        self.0.read()
+    }
+}
+
+/// Engine -> UI counters, all lock-free. The per-block state is in [`EngineState`].
 pub struct Shared {
-    pub position_beats: AtomicU64, // f64 bits
-    pub playing: AtomicBool,
-    pub peak_l: AtomicU32, // f32 bits
-    pub peak_r: AtomicU32,
     pub xruns: AtomicU32,
     /// Callbacks in which a streamed clip had no data ready (disk too slow).
     pub underruns: AtomicU32,
-    /// Device-reported delay from callback to DAC, in microseconds (0 if unknown).
-    pub output_latency_us: AtomicU32,
-    /// Frames in the most recent device callback.
-    pub block_frames: AtomicU32,
-    /// Post-fader stereo peak per track (f32 bits), for the mixer meters.
-    pub track_peak_l: [AtomicU32; MAX_TRACKS],
-    pub track_peak_r: [AtomicU32; MAX_TRACKS],
     /// Highest DSP load (f32 bits, 1.0 = the whole callback budget) since the UI last read it.
     dsp_load_max: AtomicU32,
 }
@@ -375,16 +488,8 @@ pub struct Shared {
 impl Shared {
     pub fn new() -> Self {
         Self {
-            position_beats: AtomicU64::new(0f64.to_bits()),
-            playing: AtomicBool::new(false),
-            peak_l: AtomicU32::new(0),
-            peak_r: AtomicU32::new(0),
             xruns: AtomicU32::new(0),
             underruns: AtomicU32::new(0),
-            output_latency_us: AtomicU32::new(0),
-            block_frames: AtomicU32::new(0),
-            track_peak_l: std::array::from_fn(|_| AtomicU32::new(0)),
-            track_peak_r: std::array::from_fn(|_| AtomicU32::new(0)),
             dsp_load_max: AtomicU32::new(0),
         }
     }
@@ -399,26 +504,6 @@ impl Shared {
     /// UI thread: the highest DSP load since the previous call (Logic's CPU meter), then reset.
     pub fn take_dsp_load(&self) -> f32 {
         f32::from_bits(self.dsp_load_max.swap(0, Ordering::Relaxed))
-    }
-
-    /// Post-fader (left, right) peak of `track`, linear.
-    pub fn track_peaks(&self, track: usize) -> (f32, f32) {
-        match (self.track_peak_l.get(track), self.track_peak_r.get(track)) {
-            (Some(l), Some(r)) => (
-                f32::from_bits(l.load(Ordering::Relaxed)),
-                f32::from_bits(r.load(Ordering::Relaxed)),
-            ),
-            _ => (0.0, 0.0),
-        }
-    }
-    pub fn position(&self) -> f64 {
-        f64::from_bits(self.position_beats.load(Ordering::Relaxed))
-    }
-    pub fn peaks(&self) -> (f32, f32) {
-        (
-            f32::from_bits(self.peak_l.load(Ordering::Relaxed)),
-            f32::from_bits(self.peak_r.load(Ordering::Relaxed)),
-        )
     }
 }
 
@@ -451,7 +536,7 @@ struct Voice {
     stage: u8,
     rel_step: f32,
     end_beat: f64,
-    track: u8,
+    track: u16,
     /// Live note: ignores the transport and the timeline, ends on `NoteOff`.
     live: bool,
     pitch: u8,
@@ -482,13 +567,27 @@ struct Voice {
 /// the bulk of the synth's cost, without audible stepping.
 const CTRL_BLOCK: u32 = 16;
 
+/// The app's halves of the queues a core publishes to.
+pub(crate) struct Readers {
+    pub state: Option<StateReader>,
+    pub midi: Option<Consumer<MidiOutEvent>>,
+    pub mtc: Option<Consumer<MtcMessage>>,
+}
+
 pub struct EngineCore {
     sr: f32,
     rx: Consumer<Command>,
     trash: Producer<Garbage>,
     shared: Arc<Shared>,
+    /// What the UI was last shown; the meters fall back from it.
+    shown: EngineState,
+    state: Writer<EngineState>,
+    state_reader: Option<StateReader>,
     song: Box<Song>,
     next_note: usize,
+    next_control: usize,
+    /// External tracks whose sustain pedal was last sent down.
+    ext_sustain: Vec<bool>,
     beat: f64,
     start_beat: f64,
     playing: bool,
@@ -500,15 +599,26 @@ pub struct EngineCore {
     click_remaining: u32,
     click_phase: f32,
     click_freq: f32,
-    track_gain_l: [f32; MAX_TRACKS],
-    track_gain_r: [f32; MAX_TRACKS],
-    track_ramp_l: [GainRamp; MAX_TRACKS],
-    track_ramp_r: [GainRamp; MAX_TRACKS],
+    track_gain_l: Vec<f32>,
+    track_gain_r: Vec<f32>,
+    track_ramp_l: Vec<GainRamp>,
+    track_ramp_r: Vec<GainRamp>,
     mix_ramp_remaining: u32,
-    track_pk_l: [f32; MAX_TRACKS],
-    track_pk_r: [f32; MAX_TRACKS],
-    track_audible: [bool; MAX_TRACKS],
-    track_patch: [SynthPatch; MAX_TRACKS],
+    track_pk_l: Vec<f32>,
+    track_pk_r: Vec<f32>,
+    track_audible: Vec<bool>,
+    track_patch: Vec<SynthPatch>,
+    track_external: Vec<bool>,
+    midi_out: Producer<MidiOutEvent>,
+    midi_out_reader: Option<Consumer<MidiOutEvent>>,
+    mtc: MtcGenerator,
+    mtc_rate: SmpteRate,
+    mtc_offset_frames: i64,
+    /// Seconds from the project start to the playhead, kept sample by sample while MTC is on.
+    mtc_secs: f64,
+    mtc_out: Producer<MtcMessage>,
+    mtc_out_reader: Option<Consumer<MtcMessage>>,
+    ext_notes: Vec<ExtNote>,
     test_hz: f32,
     test_gain: f32,
     test_phase: f32,
@@ -553,13 +663,21 @@ impl EngineCore {
         trash: Producer<Garbage>,
         shared: Arc<Shared>,
     ) -> Self {
+        let (state, reader) = triple_buffer(EngineState::default());
+        let (midi_out, midi_out_reader) = rtrb::RingBuffer::new(1024);
+        let (mtc_out, mtc_out_reader) = rtrb::RingBuffer::new(256);
         Self {
             sr: sample_rate.max(1) as f32,
             rx,
             trash,
             shared,
+            shown: EngineState::default(),
+            state,
+            state_reader: Some(StateReader(reader)),
             song: Box::new(Song::default()),
             next_note: 0,
+            next_control: 0,
+            ext_sustain: vec![false; MAX_TRACKS],
             beat: 0.0,
             start_beat: 0.0,
             playing: false,
@@ -571,25 +689,187 @@ impl EngineCore {
             click_remaining: 0,
             click_phase: 0.0,
             click_freq: 1000.0,
-            track_gain_l: [1.0; MAX_TRACKS],
-            track_gain_r: [1.0; MAX_TRACKS],
-            track_ramp_l: [GainRamp::new(1.0); MAX_TRACKS],
-            track_ramp_r: [GainRamp::new(1.0); MAX_TRACKS],
+            track_gain_l: vec![1.0; MAX_TRACKS],
+            track_gain_r: vec![1.0; MAX_TRACKS],
+            track_ramp_l: vec![GainRamp::new(1.0); MAX_TRACKS],
+            track_ramp_r: vec![GainRamp::new(1.0); MAX_TRACKS],
             mix_ramp_remaining: 0,
-            track_pk_l: [0.0; MAX_TRACKS],
-            track_pk_r: [0.0; MAX_TRACKS],
-            track_audible: [true; MAX_TRACKS],
-            track_patch: [SynthPatch::default(); MAX_TRACKS],
+            track_pk_l: vec![0.0; MAX_TRACKS],
+            track_pk_r: vec![0.0; MAX_TRACKS],
+            track_audible: vec![true; MAX_TRACKS],
+            track_patch: vec![SynthPatch::default(); MAX_TRACKS],
+            track_external: vec![false; MAX_TRACKS],
+            midi_out,
+            midi_out_reader: Some(midi_out_reader),
+            mtc: MtcGenerator::default(),
+            mtc_rate: SmpteRate::Fps25,
+            mtc_offset_frames: 0,
+            mtc_secs: 0.0,
+            mtc_out,
+            mtc_out_reader: Some(mtc_out_reader),
+            ext_notes: Vec::with_capacity(MAX_EXT_NOTES),
             test_hz: 0.0,
             test_gain: 0.0,
             test_phase: 0.0,
         }
     }
 
+    /// The UI's half of the state this core publishes after every block. There is one;
+    /// it is `None` once taken.
+    pub fn take_state_reader(&mut self) -> Option<StateReader> {
+        self.state_reader.take()
+    }
+
+    /// The app's half of the MIDI the engine sends to external instruments. There is one; it
+    /// is `None` once taken.
+    pub fn take_midi_out_reader(&mut self) -> Option<Consumer<MidiOutEvent>> {
+        self.midi_out_reader.take()
+    }
+
+    /// The app's half of the MIDI Time Code the engine sends. There is one; it is `None` once
+    /// taken.
+    pub fn take_mtc_reader(&mut self) -> Option<Consumer<MtcMessage>> {
+        self.mtc_out_reader.take()
+    }
+
+    /// Every reader the app takes from the core, together.
+    pub(crate) fn take_readers(&mut self) -> Readers {
+        Readers {
+            state: self.take_state_reader(),
+            midi: self.take_midi_out_reader(),
+            mtc: self.take_mtc_reader(),
+        }
+    }
+
+    /// SMPTE frames of the playhead as MTC counts them.
+    fn mtc_frames(&self) -> f64 {
+        self.mtc_secs * self.mtc_rate.frames_per_second() + self.mtc_offset_frames as f64
+    }
+
+    /// The playhead moved or the tempo map changed: tell MTC receivers where it is.
+    fn mtc_locate(&mut self) {
+        if !self.mtc.is_on() {
+            return;
+        }
+        self.mtc_secs = self.tempo_map.seconds_at(self.beat);
+        let frames = self.mtc_frames();
+        let tx = &mut self.mtc_out;
+        self.mtc.locate(frames, |m| {
+            let _ = tx.push(m);
+        });
+    }
+
+    /// Sends a Note On or Off to the external instrument of `track`. Lost when the queue is
+    /// full (nobody is listening), never blocks.
+    fn send_midi(&mut self, track: u16, on: bool, pitch: u8, vel: u8) {
+        let _ = self.midi_out.push(MidiOutEvent {
+            track,
+            on,
+            pitch,
+            vel,
+            controller: false,
+        });
+    }
+
+    /// A note for an external instrument starts.
+    fn ext_note_on(&mut self, n: NoteEvent, live: bool) {
+        // A note that is still sounding is released first, as a keyboard would.
+        if let Some(i) = self
+            .ext_notes
+            .iter()
+            .position(|e| e.track == n.track && e.pitch == n.pitch)
+        {
+            let old = self.ext_notes.swap_remove(i);
+            self.send_midi(old.track, false, old.pitch, 0);
+        }
+        if self.ext_notes.len() < MAX_EXT_NOTES {
+            self.ext_notes.push(ExtNote {
+                track: n.track,
+                pitch: n.pitch,
+                end_beat: n.end_beat,
+                live,
+            });
+            self.send_midi(n.track, true, n.pitch, n.vel.max(1));
+        }
+    }
+
+    /// Releases external notes that are due: those of the timeline once their end is reached
+    /// or the transport stopped, all of them when `all`.
+    fn release_ext_notes(&mut self, all: bool) {
+        let mut i = 0;
+        while i < self.ext_notes.len() {
+            let e = self.ext_notes[i];
+            let due = all || (!e.live && (self.beat >= e.end_beat || !self.playing));
+            if due {
+                self.ext_notes.swap_remove(i);
+                self.send_midi(e.track, false, e.pitch, 0);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// The device callback's size and output delay, published with the next block's state.
+    pub fn set_device_info(&mut self, block_frames: u32, output_latency_us: u32) {
+        self.shown.block_frames = block_frames;
+        self.shown.output_latency_us = output_latency_us;
+    }
+
+    /// Sends a controller change to the external instrument of its track (once; the sustain
+    /// pedal is remembered so a stop can let it up).
+    fn send_control(&mut self, c: ControlEvent) {
+        if !self
+            .track_external
+            .get(c.track as usize)
+            .copied()
+            .unwrap_or(false)
+        {
+            return;
+        }
+        if c.number == 64 {
+            if let Some(down) = self.ext_sustain.get_mut(c.track as usize) {
+                *down = c.value >= 64;
+            }
+        }
+        let _ = self.midi_out.push(MidiOutEvent {
+            track: c.track,
+            on: false,
+            pitch: c.number,
+            vel: c.value,
+            controller: true,
+        });
+    }
+
+    /// Lets up the sustain pedal of every external instrument it is down on.
+    fn release_ext_sustain(&mut self) {
+        for track in 0..self.ext_sustain.len() {
+            if std::mem::replace(&mut self.ext_sustain[track], false) {
+                let _ = self.midi_out.push(MidiOutEvent {
+                    track: track as u16,
+                    on: false,
+                    pitch: 64,
+                    vel: 0,
+                    controller: true,
+                });
+            }
+        }
+    }
+
     /// Silences timeline voices (seek, pause). Live notes keep playing until `NoteOff`.
     fn kill_voices(&mut self) {
+        self.release_ext_sustain();
         for v in self.voices.iter_mut().filter(|v| !v.live) {
             v.active = false;
+        }
+        // The external instruments' timeline notes stop as well (live ones are kept).
+        let mut i = 0;
+        while i < self.ext_notes.len() {
+            if self.ext_notes[i].live {
+                i += 1;
+            } else {
+                let e = self.ext_notes.swap_remove(i);
+                self.send_midi(e.track, false, e.pitch, 0);
+            }
         }
     }
 
@@ -600,7 +880,9 @@ impl EngineCore {
             .song
             .notes
             .partition_point(|n| n.start_beat < self.beat);
+        self.next_control = self.song.controls.partition_point(|c| c.beat < self.beat);
         self.reposition_clips();
+        self.mtc_locate();
     }
 
     fn reposition_clips(&mut self) {
@@ -677,10 +959,12 @@ impl EngineCore {
                         self.start_beat = self.beat;
                     }
                     self.playing = true;
+                    self.mtc_locate();
                 }
                 Command::Pause => {
                     self.playing = false;
                     self.kill_voices();
+                    self.mtc_locate();
                 }
                 Command::Stop => {
                     self.playing = false;
@@ -692,6 +976,20 @@ impl EngineCore {
                     let old = std::mem::replace(&mut self.tempo_map, map);
                     let _ = self.trash.push(Garbage::TempoMap(old));
                     self.reposition_clips();
+                    // A tempo edit after the playhead leaves the time where it was.
+                    if (self.tempo_map.seconds_at(self.beat) - self.mtc_secs).abs() > 0.001 {
+                        self.mtc_locate();
+                    }
+                }
+                Command::SetMtc {
+                    on,
+                    rate,
+                    offset_frames,
+                } => {
+                    self.mtc.configure(on, rate);
+                    self.mtc_rate = rate;
+                    self.mtc_offset_frames = offset_frames;
+                    self.mtc_locate();
                 }
                 Command::SetMetronome { on } => self.metronome = on,
                 Command::SetMasterGain { linear } => {
@@ -723,6 +1021,23 @@ impl EngineCore {
                 }
                 Command::NoteOff { pitch } => self.live_note_off(pitch, None),
                 Command::NoteOffTrack { pitch, track } => self.live_note_off(pitch, Some(track)),
+                Command::SetTrackExternal { track, external } => {
+                    if let Some(slot) = self.track_external.get_mut(track as usize) {
+                        let was = std::mem::replace(slot, external);
+                        // Notes already out to the instrument end when the track stops using it.
+                        if was && !external {
+                            let mut i = 0;
+                            while i < self.ext_notes.len() {
+                                if self.ext_notes[i].track == track {
+                                    let e = self.ext_notes.swap_remove(i);
+                                    self.send_midi(e.track, false, e.pitch, 0);
+                                } else {
+                                    i += 1;
+                                }
+                            }
+                        }
+                    }
+                }
                 Command::SetTrackPatch { track, patch } => {
                     if let Some(slot) = self.track_patch.get_mut(track as usize) {
                         *slot = patch.sanitized();
@@ -747,6 +1062,11 @@ impl EngineCore {
                     let b = self.beat;
                     self.seek(b);
                 }
+                Command::SetControls(controls) => {
+                    let old = std::mem::replace(&mut self.song.controls, controls);
+                    let _ = self.trash.push(Garbage::Controls(old));
+                    self.next_control = self.song.controls.partition_point(|c| c.beat < self.beat);
+                }
                 Command::SetNotes(notes) => {
                     let old = std::mem::replace(&mut self.song.notes, notes);
                     let _ = self.trash.push(Garbage::Notes(old));
@@ -760,13 +1080,23 @@ impl EngineCore {
     }
 
     fn trigger(&mut self, n: NoteEvent) -> usize {
+        if self
+            .track_external
+            .get(n.track as usize)
+            .copied()
+            .unwrap_or(false)
+        {
+            // An external instrument makes its own sound.
+            self.ext_note_on(n, false);
+            return 0;
+        }
         // No free voice: steal the first one.
         let idx = self
             .voices
             .iter()
             .position(|v| !v.active)
             .unwrap_or_default();
-        let track = n.track.min(MAX_TRACKS as u8 - 1);
+        let track = n.track.min(MAX_TRACKS as u16 - 1);
         let mut patch = self.track_patch[track as usize];
         let mut base_hz = midi_hz(n.pitch);
         if patch.kit != Kit::None {
@@ -806,7 +1136,25 @@ impl EngineCore {
         idx
     }
 
-    fn live_note_on(&mut self, pitch: u8, vel: u8, track: u8) {
+    fn live_note_on(&mut self, pitch: u8, vel: u8, track: u16) {
+        if self
+            .track_external
+            .get(track as usize)
+            .copied()
+            .unwrap_or(false)
+        {
+            self.ext_note_on(
+                NoteEvent {
+                    start_beat: 0.0,
+                    end_beat: f64::MAX,
+                    pitch,
+                    vel,
+                    track,
+                },
+                true,
+            );
+            return;
+        }
         let idx = self.trigger(NoteEvent {
             start_beat: 0.0,
             end_beat: f64::MAX,
@@ -821,7 +1169,17 @@ impl EngineCore {
         v.live_left = live_left;
     }
 
-    fn live_note_off(&mut self, pitch: u8, track: Option<u8>) {
+    fn live_note_off(&mut self, pitch: u8, track: Option<u16>) {
+        let mut i = 0;
+        while i < self.ext_notes.len() {
+            let e = self.ext_notes[i];
+            if e.live && e.pitch == pitch && track.is_none_or(|t| e.track == t) {
+                self.ext_notes.swap_remove(i);
+                self.send_midi(e.track, false, e.pitch, 0);
+            } else {
+                i += 1;
+            }
+        }
         for v in self.voices.iter_mut().filter(|v| {
             v.active && v.live && v.pitch == pitch && track.is_none_or(|t| v.track == t)
         }) {
@@ -837,8 +1195,8 @@ impl EngineCore {
         for c in self.song.clips.iter_mut() {
             c.service();
         }
-        self.track_pk_l = [0.0; MAX_TRACKS];
-        self.track_pk_r = [0.0; MAX_TRACKS];
+        self.track_pk_l.fill(0.0);
+        self.track_pk_r.fill(0.0);
 
         for frame in out.as_chunks_mut::<2>().0 {
             let sample_beat = self.beat;
@@ -861,6 +1219,13 @@ impl EngineCore {
                         self.trigger(n);
                     }
                 }
+                while let Some(c) = self.song.controls.get(self.next_control).copied() {
+                    if c.beat > self.beat {
+                        break;
+                    }
+                    self.next_control += 1;
+                    self.send_control(c);
+                }
                 for c in self.song.clips.iter_mut() {
                     if let Some((cl, cr)) = c.tick() {
                         let t = (c.track as usize).min(MAX_TRACKS - 1);
@@ -877,6 +1242,9 @@ impl EngineCore {
                         }
                     }
                 }
+            }
+            if !self.ext_notes.is_empty() {
+                self.release_ext_notes(false);
             }
             for v in self.voices.iter_mut().filter(|v| v.active) {
                 if v.live {
@@ -1004,6 +1372,14 @@ impl EngineCore {
             if self.playing {
                 let prev = self.beat;
                 self.beat = self.tempo_map.advance(prev, frame_secs);
+                if self.mtc.is_on() {
+                    self.mtc_secs += frame_secs;
+                    let frames = self.mtc_frames();
+                    let tx = &mut self.mtc_out;
+                    self.mtc.tick(frames, |m| {
+                        let _ = tx.push(m);
+                    });
+                }
                 if let Some((s, e)) = self.cycle {
                     if self.beat >= e {
                         let start = self.tempo_map.seconds_at(s);
@@ -1016,6 +1392,7 @@ impl EngineCore {
                             self.seek(wrapped);
                             // A fractional-sample wrap must still trigger notes at cycle start.
                             self.next_note = self.song.notes.partition_point(|n| n.start_beat < s);
+                            self.next_control = self.song.controls.partition_point(|c| c.beat < s);
                         }
                     }
                 }
@@ -1041,29 +1418,18 @@ impl EngineCore {
                 .underruns
                 .fetch_add(underruns, Ordering::Relaxed);
         }
-        self.shared
-            .position_beats
-            .store(self.beat.to_bits(), Ordering::Relaxed);
-        self.shared.playing.store(self.playing, Ordering::Relaxed);
+        let shown = &mut self.shown;
+        shown.position_beats = self.beat;
+        shown.playing = self.playing;
         // Peak with simple decay so the UI meter does not flicker between callbacks.
-        let (ol, or) = self.shared.peaks();
-        self.shared
-            .peak_l
-            .store(decayed_peak(pk_l, ol).to_bits(), Ordering::Relaxed);
-        self.shared
-            .peak_r
-            .store(decayed_peak(pk_r, or).to_bits(), Ordering::Relaxed);
-        for t in 0..MAX_TRACKS {
-            let (ol, or) = self.shared.track_peaks(t);
-            self.shared.track_peak_l[t].store(
-                decayed_peak(self.track_pk_l[t], ol).to_bits(),
-                Ordering::Relaxed,
-            );
-            self.shared.track_peak_r[t].store(
-                decayed_peak(self.track_pk_r[t], or).to_bits(),
-                Ordering::Relaxed,
-            );
+        let (ol, or) = shown.peaks;
+        shown.peaks = (decayed_peak(pk_l, ol), decayed_peak(pk_r, or));
+        for (t, (l, r)) in shown.track_peaks.iter_mut().enumerate() {
+            *l = decayed_peak(self.track_pk_l[t], *l);
+            *r = decayed_peak(self.track_pk_r[t], *r);
         }
+        *self.state.input() = *shown;
+        self.state.publish();
     }
 }
 
@@ -1071,11 +1437,14 @@ impl EngineCore {
 mod tests {
     use super::*;
 
-    fn rig() -> (EngineCore, Producer<Command>, Arc<Shared>) {
+    fn rig() -> (EngineCore, Producer<Command>, StateReader) {
         let (tx, rx) = rtrb::RingBuffer::new(64);
         let (gtx, _grx) = rtrb::RingBuffer::new(8);
-        let shared = Arc::new(Shared::new());
-        (EngineCore::new(48_000, rx, gtx, shared.clone()), tx, shared)
+        let mut core = EngineCore::new(48_000, rx, gtx, Arc::new(Shared::new()));
+        let Some(state) = core.take_state_reader() else {
+            panic!("one reader");
+        };
+        (core, tx, state)
     }
 
     fn note(start: f64, end: f64) -> NoteEvent {
@@ -1346,25 +1715,29 @@ mod tests {
 
     #[test]
     fn transport_advances_one_beat_per_half_second_at_120() {
-        let (mut e, mut tx, s) = rig();
+        let (mut e, mut tx, mut s) = rig();
         assert!(tx.push(Command::Play).is_ok());
         let mut buf = vec![0.0f32; 24_000 * 2];
         e.process(&mut buf);
-        assert!((s.position() - 1.0).abs() < 1e-3, "{}", s.position());
-        assert!(s.playing.load(Ordering::Relaxed));
+        assert!(
+            (s.read().position_beats - 1.0).abs() < 1e-3,
+            "{}",
+            s.read().position_beats
+        );
+        assert!(s.read().playing);
     }
 
     #[test]
     fn stop_returns_to_start_position() {
-        let (mut e, mut tx, s) = rig();
+        let (mut e, mut tx, mut s) = rig();
         assert!(tx.push(Command::SetPosition { beat: 8.0 }).is_ok());
         assert!(tx.push(Command::Play).is_ok());
         let mut buf = vec![0.0f32; 4800 * 2];
         e.process(&mut buf);
-        assert!(s.position() > 8.0);
+        assert!(s.read().position_beats > 8.0);
         assert!(tx.push(Command::Stop).is_ok());
         e.process(&mut buf);
-        assert_eq!(s.position(), 8.0);
+        assert_eq!(s.read().position_beats, 8.0);
     }
 
     #[test]
@@ -1414,7 +1787,7 @@ mod tests {
 
     #[test]
     fn hard_left_pan_silences_right_and_meters_track() {
-        let (mut e, mut tx, s) = rig();
+        let (mut e, mut tx, mut s) = rig();
         let mix = TrackMix {
             pan: -1.0,
             ..TrackMix::default()
@@ -1432,13 +1805,13 @@ mod tests {
         let left = buf.iter().step_by(2).fold(0f32, |m, x| m.max(x.abs()));
         assert!(right < 1e-6, "right {right}");
         assert!(left > 0.05, "left {left}");
-        let (tl, tr) = s.track_peaks(0);
+        let (tl, tr) = s.read().track_peaks(0);
         assert!(tl > 0.05 && tr < 1e-6, "meters {tl} {tr}");
     }
 
     #[test]
     fn live_note_sounds_while_stopped_and_stops_on_note_off() {
-        let (mut e, mut tx, s) = rig();
+        let (mut e, mut tx, mut s) = rig();
         assert!(tx
             .push(Command::SetSong(Box::new(Song::new(
                 vec![],
@@ -1455,7 +1828,7 @@ mod tests {
         let mut buf = vec![0.0f32; 4800 * 2];
         e.process(&mut buf);
         assert!(buf.iter().any(|x| x.abs() > 0.05), "no sound while stopped");
-        assert!(!s.playing.load(Ordering::Relaxed));
+        assert!(!s.read().playing);
         // A seek must not cut a live note.
         assert!(tx.push(Command::SetPosition { beat: 1.0 }).is_ok());
         e.process(&mut buf);
@@ -1735,7 +2108,7 @@ mod tests {
 
     #[test]
     fn cycle_loops_back() {
-        let (mut e, mut tx, s) = rig();
+        let (mut e, mut tx, mut s) = rig();
         assert!(tx
             .push(Command::SetCycle {
                 on: true,
@@ -1746,7 +2119,7 @@ mod tests {
         assert!(tx.push(Command::Play).is_ok());
         let mut buf = vec![0.0f32; 48_000 * 2];
         e.process(&mut buf);
-        assert!(s.position() < 1.0);
+        assert!(s.read().position_beats < 1.0);
     }
 
     #[test]
@@ -1833,7 +2206,7 @@ mod tests {
     #[test]
     fn transport_follows_tempo_changes() {
         use crate::tempo_map::TempoEvent;
-        let (mut e, mut tx, s) = rig();
+        let (mut e, mut tx, mut s) = rig();
         // 120 BPM for the first beat (0.5 s), then 60 BPM.
         let map = TempoMap::new(
             vec![
@@ -1854,7 +2227,11 @@ mod tests {
         assert!(tx.push(Command::Play).is_ok());
         let mut buf = vec![0.0f32; 48_000 * 2];
         e.process(&mut buf);
-        assert!((s.position() - 1.5).abs() < 1e-6, "{}", s.position());
+        assert!(
+            (s.read().position_beats - 1.5).abs() < 1e-6,
+            "{}",
+            s.read().position_beats
+        );
     }
 
     #[test]
@@ -1906,7 +2283,7 @@ mod tests {
 
     #[test]
     fn solo_plays_only_soloed_tracks_until_released() {
-        let (mut e, mut tx, s) = rig();
+        let (mut e, mut tx, mut s) = rig();
         let on = |track| NoteEvent {
             start_beat: 0.0,
             end_beat: 8.0,
@@ -1923,13 +2300,13 @@ mod tests {
         assert!(tx.push(Command::Play).is_ok());
         let mut buf = vec![0.0f32; 4_800 * 2];
         e.process(&mut buf);
-        assert_eq!(s.track_peaks(0), (0.0, 0.0), "not soloed: silent");
-        assert!(s.track_peaks(1).0 > 0.0, "soloed: audible");
+        assert_eq!(s.read().track_peaks(0), (0.0, 0.0), "not soloed: silent");
+        assert!(s.read().track_peaks(1).0 > 0.0, "soloed: audible");
 
         // Releasing solo brings the other track back.
         let mix = TrackMix::default();
         assert!(tx.push(Command::SetTrackMix { track: 1, mix }).is_ok());
         e.process(&mut buf);
-        assert!(s.track_peaks(0).0 > 0.0 && s.track_peaks(1).0 > 0.0);
+        assert!(s.read().track_peaks(0).0 > 0.0 && s.read().track_peaks(1).0 > 0.0);
     }
 }

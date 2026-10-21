@@ -139,6 +139,11 @@ const EDIT: &[&str] = &[
 const TRACK: &[&str] = &[
     "New",
     "New Aux Track",
+    "New VCA Track",
+    "New External MIDI Track",
+    "New Pattern Region",
+    "New Drummer Region",
+    "MIDI FX…",
     "Rename Track",
     "Delete Track",
     "-",
@@ -148,6 +153,7 @@ const TRACK: &[&str] = &[
     "Show Tempo Track",
     "Show Chord Track",
     "Show Marker Track",
+    "Show Signature Track",
     "Show Arrangement Track",
     "-",
     "Assign Track Color…",
@@ -318,6 +324,7 @@ pub(crate) const MENUS: [(&str, &[&str]); 9] = [
 pub(crate) const CHECKABLE: &[&str] = &[
     "Show Tempo Track",
     "Show Marker Track",
+    "Show Signature Track",
     "Show Piano Roll",
     "Show Mixer",
     "Show Library",
@@ -442,12 +449,19 @@ pub(crate) fn enabled(label: &str, p: &Project, s: &crate::UiState) -> bool {
         "Go to Next Marker" => p.next_marker(p.position_beats).is_some(),
         "Go to Previous Marker" => p.previous_marker(p.position_beats).is_some(),
         "Delete Marker" => p.marker_at(p.position_beats).is_some(),
+        // Pattern and Drummer regions go on a track that plays MIDI.
+        "New Pattern Region" | "New Drummer Region" => p
+            .tracks
+            .get(p.selected_track)
+            .is_some_and(|t| t.kind.has_regions() && t.kind != TrackKind::Audio),
         "Go to Next Region" | "Go to Previous Region" => {
             p.tracks.iter().any(|t| !t.regions.is_empty())
         }
         "New from Template…"
         | "New"
         | "New Aux Track"
+        | "New VCA Track"
+        | "New External MIDI Track"
         | "Create Track Stack…"
         | "Go to Beginning"
         | "Go to End"
@@ -466,6 +480,10 @@ pub(crate) fn enabled(label: &str, p: &Project, s: &crate::UiState) -> bool {
         | "Check for Updates Automatically"
         | "Show Tempo Track"
         | "Show Marker Track"
+        | "Show Signature Track"
+        | "MIDI File…"
+        | "MIDI FX…"
+        | "Selection as MIDI File…"
         | "Create Marker"
         | "Mixer"
         | "Piano Roll"
@@ -478,12 +496,11 @@ pub(crate) fn enabled(label: &str, p: &Project, s: &crate::UiState) -> bool {
 
 /// Start of every region, in beats, sorted (for Go to Next / Previous Region).
 fn region_starts(p: &Project) -> Vec<f64> {
-    let bpb = p.beats_per_bar();
     let mut starts: Vec<f64> = p
         .tracks
         .iter()
         .flat_map(|t| t.regions.iter())
-        .map(|r| (r.start_bar as f64 - 1.0) * bpb)
+        .map(|r| p.region_start_beats(r))
         .collect();
     starts.sort_by(f64::total_cmp);
     starts
@@ -500,6 +517,7 @@ pub(crate) fn checked(label: &str, s: &crate::UiState) -> bool {
         "Check for Updates Automatically" => s.update_auto,
         "Show Tempo Track" => s.tracks.show_tempo,
         "Show Marker Track" => s.tracks.show_markers,
+        "Show Signature Track" => s.tracks.show_signatures,
         _ if Lang::from_native_name(label).is_some() => {
             Lang::from_native_name(label) == Some(i18n::current())
         }
@@ -536,10 +554,11 @@ pub(crate) fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
         }
         "Show Tempo Track" => s.tracks.show_tempo = !s.tracks.show_tempo,
         "Show Marker Track" => s.tracks.show_markers = !s.tracks.show_markers,
+        "Show Signature Track" => s.tracks.show_signatures = !s.tracks.show_signatures,
         // Logic: Create Marker puts it at the playhead, rounded to the nearest bar.
         "Create Marker" => {
-            let bpb = p.beats_per_bar();
-            p.add_marker((p.position_beats / bpb).round() * bpb);
+            let bar = p.beats_to_bar(p.position_beats).round();
+            p.add_marker(p.bar_to_beats(bar));
             s.tracks.show_markers = true;
         }
         "Delete Marker" => {
@@ -569,6 +588,23 @@ pub(crate) fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
         "New" => {
             p.add_track(TrackKind::Instrument);
         }
+        "New VCA Track" => {
+            p.add_track(TrackKind::Vca);
+        }
+        "New External MIDI Track" => {
+            p.add_track(TrackKind::ExternalMidi);
+        }
+        "MIDI FX…" => s.show_midi_fx = !s.show_midi_fx,
+        "MIDI File…" => s.midi_cmd = Some(crate::midi_file::MidiCmd::Import),
+        "Selection as MIDI File…" => s.midi_cmd = Some(crate::midi_file::MidiCmd::Export),
+        "New Pattern Region" | "New Drummer Region" => {
+            // On the selected track, at the bar the playhead is in.
+            let bar = p.beats_to_bar(p.position_beats).floor() as f32 + 1.0;
+            let track = p.selected_track;
+            if let Some(ri) = p.add_generated_region(track, label == "New Drummer Region", bar) {
+                s.tracks.selected = Some((track, ri));
+            }
+        }
         "New Aux Track" => {
             p.add_track(TrackKind::Aux);
         }
@@ -578,12 +614,11 @@ pub(crate) fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
         "Delete" => crate::tracks_area::delete_selected(p, &mut s.tracks),
         "Deselect All" => s.tracks.selected = None,
         "Go to End" => {
-            let bpb = p.beats_per_bar();
             p.position_beats = p
                 .tracks
                 .iter()
                 .flat_map(|t| t.regions.iter())
-                .map(|r| (r.start_bar + r.len_bars - 1.0) as f64 * bpb)
+                .map(|r| p.region_end_beats(r))
                 .fold(0.0, f64::max);
         }
         "Go to Left Locator" => p.position_beats = p.cycle_start,
@@ -949,7 +984,7 @@ pub fn status_line(ui: &mut egui::Ui, p: &Project, s: &crate::UiState) {
             &[&(max + 1), &p.tracks.len(), &max],
         );
         ui.colored_label(warn, text).on_hover_text(tr(
-            "The audio engine plays up to 64 tracks. Tracks after that are kept in the project but not played.",
+            "The audio engine plays up to 1024 tracks. Tracks after that are kept in the project but not played.",
         ));
     }
 }
@@ -969,11 +1004,15 @@ mod tests {
                 p.position_beats,
                 p.recording,
                 (s.show_mixer, s.show_library, s.show_inspector, s.show_lists),
-                (s.update_check, s.update_auto),
+                (s.update_check, s.update_auto, s.show_midi_fx),
                 s.bottom == Bottom::Mixer,
-                (s.file_cmd, s.chooser.is_some(), s.undo_cmd),
+                (s.file_cmd, s.chooser.is_some(), s.undo_cmd, s.midi_cmd),
                 (s.ui_scale, s.tracks.bar_w, s.tracks.selected),
-                (s.tracks.show_tempo, s.tracks.show_markers),
+                (
+                    s.tracks.show_tempo,
+                    s.tracks.show_markers,
+                    s.tracks.show_signatures
+                ),
                 (i18n::chosen(), i18n::current()),
             )
         )

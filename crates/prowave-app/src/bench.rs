@@ -45,6 +45,46 @@ const RENDER_SECS: f64 = 20.0;
 
 static START: OnceLock<Instant> = OnceLock::new();
 
+/// Time spent building the interface, summed over the frames since the app settled.
+static UI_MICROS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static UI_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Times the frame it lives in (what `ui_ms` in the bench report averages).
+pub struct FrameTimer(Instant);
+
+pub fn frame_timer() -> FrameTimer {
+    FrameTimer(Instant::now())
+}
+
+impl Drop for FrameTimer {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        UI_MICROS.fetch_add(self.0.elapsed().as_micros() as u64, Relaxed);
+        UI_FRAMES.fetch_add(1, Relaxed);
+    }
+}
+
+/// A project of `n` tracks cloned from the demo's, each with its regions: to see how the
+/// interface copes with a big song (`PROWAVE_BENCH_TRACKS=1000`).
+pub fn many_tracks(n: usize) -> Project {
+    let mut p = Project::demo();
+    let base: Vec<_> = p
+        .tracks
+        .iter()
+        .filter(|t| t.kind != TrackKind::Output)
+        .cloned()
+        .collect();
+    p.tracks = (0..n)
+        .map(|i| {
+            let mut t = base[i % base.len()].clone();
+            t.name = format!("Track {}", i + 1);
+            t
+        })
+        .collect();
+    p.position_beats = 0.0;
+    p
+}
+
 /// Marks the start of `main`; `startup_ms` counts from here.
 pub fn mark_start() {
     let _ = START.set(Instant::now());
@@ -122,18 +162,19 @@ pub fn render(p: &Project, secs: f64) -> Render {
     let (trash_tx, mut trash_rx) = rtrb::RingBuffer::new(64);
     let shared = Arc::new(Shared::new());
     let mut core = EngineCore::new(SAMPLE_RATE, rx, trash_tx, shared.clone());
+    let mut state = core.take_state_reader().expect("state reader");
     let mut commands = vec![
         Command::SetSong(Box::new(crate::engine_sync::offline_song(p))),
         Command::SetTempoMap(Box::new(p.tempo_map())),
         Command::SetCycle {
             on: true,
             start_beat: 0.0,
-            end_beat: 12.0 * p.beats_per_bar(),
+            end_beat: p.bar_to_beats(12.0),
         },
     ];
     for (i, t) in p.tracks.iter().enumerate() {
         commands.push(Command::SetTrackPatch {
-            track: i as u8,
+            track: i as u16,
             patch: crate::patches::synth_patch(t),
         });
     }
@@ -166,7 +207,7 @@ pub fn render(p: &Project, secs: f64) -> Render {
             }
         }
         for i in 0..p.tracks.len() {
-            let (l, rr) = shared.track_peaks(i);
+            let (l, rr) = state.read().track_peaks(i);
             if !(l.is_finite() && rr.is_finite()) && !r.bad_meters.contains(&i) {
                 r.bad_meters.push(i);
             }
@@ -215,6 +256,15 @@ impl Probe {
         }
         if let Some(mb) = rss_mb() {
             let _ = writeln!(report, "idle_rss_mb={mb:.1}");
+        }
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            let frames = UI_FRAMES.load(Relaxed).max(1);
+            let _ = writeln!(
+                report,
+                "ui_ms={:.2}",
+                UI_MICROS.load(Relaxed) as f64 / frames as f64 / 1000.0
+            );
         }
         dsp_lines(&mut report);
         write_report(&self.out, &report);

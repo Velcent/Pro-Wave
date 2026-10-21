@@ -38,7 +38,17 @@ pub enum SmpteRate {
 }
 
 impl SmpteRate {
-    fn frames_per_second(self) -> f64 {
+    /// Every rate, in the order a menu lists them.
+    pub const ALL: [SmpteRate; 5] = [
+        Self::Fps24,
+        Self::Fps25,
+        Self::Fps29_97NonDrop,
+        Self::Fps29_97Drop,
+        Self::Fps30,
+    ];
+
+    /// Real frames per second.
+    pub fn frames_per_second(self) -> f64 {
         match self {
             Self::Fps24 => 24.0,
             Self::Fps25 => 25.0,
@@ -47,12 +57,98 @@ impl SmpteRate {
         }
     }
 
-    fn nominal_fps(self) -> u64 {
+    /// Frames per second as counted in the labels (30 for both 29.97 rates).
+    pub fn nominal_fps(self) -> u64 {
         match self {
             Self::Fps24 => 24,
             Self::Fps25 => 25,
             Self::Fps29_97Drop | Self::Fps29_97NonDrop | Self::Fps30 => 30,
         }
+    }
+
+    /// Whether the labels skip `;00` and `;01` at the start of each minute but every tenth.
+    pub fn is_drop_frame(self) -> bool {
+        self == Self::Fps29_97Drop
+    }
+
+    /// The frame number of the label `t` (ignoring `subframe`): how many real frames after
+    /// `00:00:00:00` it is. The inverse of [`SmpteRate::smpte_of_frames`] for whole frames.
+    pub fn frames_of(self, t: Smpte) -> i64 {
+        let nominal = self.nominal_fps() as i64;
+        let seconds = t.h as i64 * 3600 + t.m as i64 * 60 + t.s as i64;
+        let labels = seconds * nominal + t.f as i64;
+        if self.is_drop_frame() {
+            let minutes = t.h as i64 * 60 + t.m as i64;
+            labels - 2 * (minutes - minutes / 10)
+        } else {
+            labels
+        }
+    }
+
+    /// The label of the frame `frames` real frames after `00:00:00:00` (fractions of a frame
+    /// are the `subframe`). Wraps at 24 hours.
+    pub fn smpte_of_frames(self, frames: f64) -> Smpte {
+        let nominal = self.nominal_fps();
+        if !frames.is_finite() {
+            return Smpte::default();
+        }
+        // A position that is exactly on a frame (a timecode converted to seconds and back)
+        // can land a hair below it: `frame / fps * fps` is 2.9999999999999996, not 3, and
+        // flooring that would label it one frame early. A millionth of a frame is 40 ns.
+        let frames = if frames.abs() < 1e12 {
+            (frames * 1e6).round() / 1e6
+        } else {
+            frames
+        };
+
+        // A 24-hour drop-frame day contains 2,589,408 actual frames. Other rates
+        // wrap at their nominal 24-hour label count.
+        let day_frames = if self.is_drop_frame() {
+            2_589_408_i64
+        } else {
+            (nominal * 24 * 60 * 60) as i64
+        };
+        let mut frame_index = frames.floor() as i64 % day_frames;
+        if frame_index < 0 {
+            frame_index += day_frames;
+        }
+        let subframe = ((frames - frames.floor()) * 100.0).floor() as u8;
+
+        let label_index = if self.is_drop_frame() {
+            let frames_per_ten_minutes = 17_982_i64;
+            let frames_per_minute = 1_798_i64;
+            let ten_minute_blocks = frame_index / frames_per_ten_minutes;
+            let remainder = frame_index % frames_per_ten_minutes;
+            let dropped = 18 * ten_minute_blocks
+                + if remainder >= 2 {
+                    2 * ((remainder - 2) / frames_per_minute)
+                } else {
+                    0
+                };
+            frame_index + dropped
+        } else {
+            frame_index
+        } as u64;
+        let frames_per_day_label = nominal * 24 * 60 * 60;
+        let label_index = label_index % frames_per_day_label;
+        let f = label_index % nominal;
+        let total_seconds = label_index / nominal;
+        let s = total_seconds % 60;
+        let total_minutes = total_seconds / 60;
+        Smpte {
+            h: (total_minutes / 60) as u8,
+            m: (total_minutes % 60) as u8,
+            s: s as u8,
+            f: f as u8,
+            subframe,
+        }
+    }
+}
+
+impl std::fmt::Display for Smpte {
+    /// `hh:mm:ss:ff`, without the subframe.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:02}:{:02}:{:02}:{:02}", self.h, self.m, self.s, self.f)
     }
 }
 
@@ -377,63 +473,20 @@ impl TempoMap {
     /// Timecode wraps at 24 hours. Drop-frame mode skips labels `;00` and `;01`
     /// at the start of each minute except every tenth minute.
     pub fn smpte_at_with_offset(&self, beat: f64, rate: SmpteRate, offset_frames: i64) -> Smpte {
-        let nominal = rate.nominal_fps();
-        let actual_fps = rate.frames_per_second();
-        let seconds = self.seconds_at(beat);
-        let frames = seconds * actual_fps + offset_frames as f64;
-        if !frames.is_finite() {
-            return Smpte::default();
-        }
-        // A position that is exactly on a frame (a timecode converted to seconds and back)
-        // can land a hair below it: `frame / fps * fps` is 2.9999999999999996, not 3, and
-        // flooring that would label it one frame early. A millionth of a frame is 40 ns.
-        let frames = if frames.abs() < 1e12 {
-            (frames * 1e6).round() / 1e6
-        } else {
-            frames
-        };
+        rate.smpte_of_frames(self.smpte_frames_at(beat, rate, offset_frames))
+    }
 
-        // A 24-hour drop-frame day contains 2,589,408 actual frames. Other rates
-        // wrap at their nominal 24-hour label count.
-        let day_frames = if rate == SmpteRate::Fps29_97Drop {
-            2_589_408_i64
-        } else {
-            (nominal * 24 * 60 * 60) as i64
-        };
-        let mut frame_index = frames.floor() as i64 % day_frames;
-        if frame_index < 0 {
-            frame_index += day_frames;
-        }
-        let subframe = ((frames - frames.floor()) * 100.0).floor() as u8;
+    /// Real frames (with a fraction) from `00:00:00:00` to `beat`, when the project starts
+    /// `offset_frames` frames after it.
+    pub fn smpte_frames_at(&self, beat: f64, rate: SmpteRate, offset_frames: i64) -> f64 {
+        self.seconds_at(beat) * rate.frames_per_second() + offset_frames as f64
+    }
 
-        let label_index = if rate == SmpteRate::Fps29_97Drop {
-            let frames_per_ten_minutes = 17_982_i64;
-            let frames_per_minute = 1_798_i64;
-            let ten_minute_blocks = frame_index / frames_per_ten_minutes;
-            let remainder = frame_index % frames_per_ten_minutes;
-            let dropped = 18 * ten_minute_blocks
-                + if remainder >= 2 {
-                    2 * ((remainder - 2) / frames_per_minute)
-                } else {
-                    0
-                };
-            frame_index + dropped
-        } else {
-            frame_index
-        } as u64;
-        let frames_per_day_label = nominal * 24 * 60 * 60;
-        let label_index = label_index % frames_per_day_label;
-        let f = label_index % nominal;
-        let total_seconds = label_index / nominal;
-        let s = total_seconds % 60;
-        let total_minutes = total_seconds / 60;
-        Smpte {
-            h: (total_minutes / 60) as u8,
-            m: (total_minutes % 60) as u8,
-            s: s as u8,
-            f: f as u8,
-            subframe,
-        }
+    /// The beat at timecode `t` (the inverse of [`TempoMap::smpte_at_with_offset`]); before
+    /// the project start it is negative.
+    pub fn beat_at_smpte(&self, t: Smpte, rate: SmpteRate, offset_frames: i64) -> f64 {
+        let frames = rate.frames_of(t) as f64 + t.subframe as f64 / 100.0 - offset_frames as f64;
+        self.beat_at(frames / rate.frames_per_second())
     }
 
     /// Beat at which `bar` (0-based) starts.
@@ -692,6 +745,58 @@ mod tests {
         let p = m.position(5.0);
         assert_eq!((p.bar, p.beat), (1, 1));
         assert_eq!(m.position(-3.0).bar, 0);
+    }
+
+    #[test]
+    fn labels_and_frame_numbers_are_inverses_for_every_rate() {
+        for rate in SmpteRate::ALL {
+            // Every frame of the first hour and a bit, which holds six drop-frame minutes.
+            for n in (0..140_000i64).chain(2_000_000..2_001_000) {
+                let t = rate.smpte_of_frames(n as f64);
+                assert_eq!(rate.frames_of(t), n, "{rate:?} frame {n} is {t}");
+            }
+        }
+        let t = SmpteRate::Fps29_97Drop.smpte_of_frames(1_800.0);
+        assert_eq!(t.to_string(), "00:01:00:02");
+        let t = SmpteRate::Fps25.smpte_of_frames(90_000.0);
+        assert_eq!(t.to_string(), "01:00:00:00");
+    }
+
+    #[test]
+    fn a_timecode_finds_its_beat_through_tempo_changes_and_the_start_offset() {
+        let map = TempoMap::new(
+            vec![
+                TempoEvent {
+                    beat: 0.0,
+                    bpm: 100.0,
+                    curve: TempoCurve::Linear,
+                },
+                tempo(16.0, 140.0),
+                tempo(40.0, 90.0),
+            ],
+            vec![],
+        );
+        // The project starts at 01:00:00:00 (25 fps).
+        let offset = 25 * 3600;
+        for beat in [0.0, 0.5, 7.3, 16.0, 25.0, 40.0, 100.0] {
+            let t = map.smpte_at_with_offset(beat, SmpteRate::Fps25, offset);
+            let back = map.beat_at_smpte(t, SmpteRate::Fps25, offset);
+            // The label is whole frames and hundredths of a frame: a frame at 25 fps is 0.04 s,
+            // under 0.1 beat at these tempos.
+            assert!((back - beat).abs() < 0.1, "{beat}: {t} gives {back}");
+        }
+        let at_start = map.smpte_at_with_offset(0.0, SmpteRate::Fps25, offset);
+        assert_eq!(at_start.to_string(), "01:00:00:00");
+        assert!(map.beat_at_smpte(at_start, SmpteRate::Fps25, offset).abs() < 1e-9);
+        // Before the start the beat is negative (a pre-roll).
+        let before = Smpte {
+            h: 0,
+            m: 59,
+            s: 59,
+            f: 0,
+            subframe: 0,
+        };
+        assert!(map.beat_at_smpte(before, SmpteRate::Fps25, offset) < 0.0);
     }
 
     #[test]

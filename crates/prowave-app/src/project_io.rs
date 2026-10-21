@@ -6,14 +6,19 @@
 use crate::import::audio_region;
 use crate::library::CATEGORIES;
 use crate::model::{
-    CompSegment, Control, Marker, Note, Project, Region, RegionParams, SendSlot, Take, TakeFolder,
-    TempoPoint, Track, TrackKind, TrackParams, MAX_REGION_GAIN, MIN_REGION_GAIN,
+    CompSegment, Control, Generated, Generator, Marker, Note, Project, Region, RegionParams,
+    SendSlot, SigChange, Take, TakeFolder, TempoPoint, Track, TrackKind, TrackParams,
+    MAX_REGION_GAIN, MIN_REGION_GAIN,
+};
+use crate::pattern::{
+    Direction, DrumStyle, DrummerParams, PatternParams, PatternRow, StepRate, MAX_ROWS, MAX_STEPS,
 };
 use egui::Color32;
-use prowave_engine::{AudioFile, FadeCurve};
+use prowave_engine::{AudioFile, FadeCurve, SmpteRate};
 use prowave_project::{
-    media_path, CompDoc, ControlDoc, MarkerDoc, MediaFile, NoteDoc, ProjectDoc, RegionDoc, TakeDoc,
-    TempoChangeDoc, TrackDoc, TrackKindDoc,
+    media_path, CompDoc, ControlDoc, DrummerDoc, MarkerDoc, MediaFile, MidiFxDoc, NoteDoc,
+    PatternDoc, PatternRowDoc, ProjectDoc, RegionDoc, SigChangeDoc, TakeDoc, TempoChangeDoc,
+    TrackDoc, TrackKindDoc,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,6 +32,8 @@ fn kind_to_doc(k: TrackKind) -> TrackKindDoc {
         TrackKind::Output => TrackKindDoc::Output,
         TrackKind::Aux => TrackKindDoc::Aux,
         TrackKind::Folder => TrackKindDoc::Folder,
+        TrackKind::Vca => TrackKindDoc::Vca,
+        TrackKind::ExternalMidi => TrackKindDoc::ExternalMidi,
     }
 }
 
@@ -39,6 +46,8 @@ fn kind_from_doc(k: TrackKindDoc) -> TrackKind {
         TrackKindDoc::Output => TrackKind::Output,
         TrackKindDoc::Aux => TrackKind::Aux,
         TrackKindDoc::Folder => TrackKind::Folder,
+        TrackKindDoc::Vca => TrackKind::Vca,
+        TrackKindDoc::ExternalMidi => TrackKind::ExternalMidi,
     }
 }
 
@@ -64,7 +73,10 @@ fn intern(s: &str) -> &'static str {
     k
 }
 
-fn builtin_name(s: &str) -> Option<&'static str> {
+pub(crate) fn builtin_name(s: &str) -> Option<&'static str> {
+    if let Some((k, _)) = crate::score::KEYS.iter().find(|(k, _)| *k == s) {
+        return Some(k);
+    }
     const EXTRA: &[&str] = &[
         "E-Piano",
         "Sampler",
@@ -160,6 +172,22 @@ pub fn to_doc(p: &Project) -> (ProjectDoc, Vec<MediaFile>) {
             height: t.height,
             indent: t.indent,
             folded: t.folded,
+            vca: t.vca,
+            midi_port: t.midi_port.clone(),
+            midi_channel: t.midi_channel,
+            midi_fx: t
+                .midi_fx
+                .iter()
+                .map(|s| MidiFxDoc {
+                    kind: s.fx.name().into(),
+                    on: s.on,
+                    settings: s.fx.numbers(),
+                    script: match &s.fx {
+                        crate::midi_fx::MidiFx::Scripter { source } => source.clone(),
+                        _ => String::new(),
+                    },
+                })
+                .collect(),
             regions: t
                 .regions
                 .iter()
@@ -244,6 +272,15 @@ pub fn to_doc(p: &Project) -> (ProjectDoc, Vec<MediaFile>) {
                     fade_out: r.params.fade_out,
                     fade_curve: curve_name(r.params.fade_curve).into(),
                     reverse: r.params.reverse,
+                    crossfade: r.params.crossfade,
+                    pattern: match r.generated.as_ref().map(|g| &g.source) {
+                        Some(Generator::Pattern(p)) => Some(pattern_to_doc(p)),
+                        _ => None,
+                    },
+                    drummer: match r.generated.as_ref().map(|g| &g.source) {
+                        Some(Generator::Drummer(d)) => Some(drummer_to_doc(d)),
+                        _ => None,
+                    },
                 })
                 .collect(),
         })
@@ -268,6 +305,21 @@ pub fn to_doc(p: &Project) -> (ProjectDoc, Vec<MediaFile>) {
             .map(|t| TempoChangeDoc {
                 beat: t.beat,
                 bpm: t.bpm,
+                ramp: t.ramp,
+            })
+            .collect(),
+        tempo_ramp: p.tempo_ramp,
+        smpte_rate: smpte_rate_name(p.smpte_rate).into(),
+        smpte_start: p.smpte_start,
+        mtc_out: p.mtc_out.clone(),
+        mtc_in: p.mtc_in.clone(),
+        sig_changes: p
+            .sig_changes
+            .iter()
+            .map(|c| SigChangeDoc {
+                bar: c.bar,
+                num: c.num,
+                den: c.den,
             })
             .collect(),
         markers: p
@@ -395,6 +447,7 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
                     })
                     .collect(),
                 folder: None,
+                generated: generated_from_doc(r),
                 audio,
                 params: RegionParams {
                     mute: r.mute,
@@ -406,6 +459,7 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
                     fade_out: finite_in(r.fade_out, 0.0, MAX_FADE, 0.0),
                     fade_curve: curve_from_name(&r.fade_curve),
                     reverse: r.reverse,
+                    crossfade: r.crossfade,
                 },
             };
             // A take folder's notes are what its comp plays.
@@ -443,6 +497,20 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
             height: finite_in(t.height, Track::MIN_HEIGHT, Track::MAX_HEIGHT, 1.0),
             indent: t.indent,
             folded: t.folded,
+            vca: t.vca,
+            midi_port: port_name(&t.midi_port),
+            midi_channel: t.midi_channel.clamp(1, 16),
+            midi_fx: t
+                .midi_fx
+                .iter()
+                .take(crate::midi_fx::MAX_FX)
+                .filter_map(|d| {
+                    Some(crate::midi_fx::FxSlot {
+                        fx: crate::midi_fx::MidiFx::from_parts(&d.kind, &d.settings, &d.script)?,
+                        on: d.on,
+                    })
+                })
+                .collect(),
         });
     }
     let mut p = Project::empty();
@@ -454,9 +522,15 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
         .map(|t| TempoPoint {
             beat: t.beat,
             bpm: t.bpm,
+            ramp: t.ramp,
         })
         .collect();
+    p.tempo_ramp = doc.tempo_ramp;
     p.tidy_tempo();
+    p.smpte_rate = smpte_rate_from_name(&doc.smpte_rate);
+    p.smpte_start = valid_smpte_start(doc.smpte_start, p.smpte_rate);
+    p.mtc_out = port_name(&doc.mtc_out);
+    p.mtc_in = port_name(&doc.mtc_in);
     p.markers = doc
         .markers
         .iter()
@@ -468,6 +542,16 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
         .collect();
     p.tidy_markers();
     p.sig = signature(doc.sig);
+    p.sig_changes = doc
+        .sig_changes
+        .iter()
+        .map(|c| SigChange {
+            bar: c.bar,
+            num: c.num,
+            den: c.den,
+        })
+        .collect();
+    p.tidy_signatures();
     p.key = intern(&doc.key);
     p.position_beats = doc.position_beats.max(0.0);
     p.cycle = doc.cycle;
@@ -477,11 +561,21 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
     p.count_in = doc.count_in;
     p.master_vol = doc.master_vol.clamp(0.0, 2.0);
     p.selected_track = doc.selected_track.min(tracks.len().saturating_sub(1));
+    // A VCA assignment has to point at a VCA track (never at the track itself), and a VCA
+    // track cannot be assigned to another.
+    let kinds: Vec<TrackKind> = tracks.iter().map(|t| t.kind).collect();
+    for (i, t) in tracks.iter_mut().enumerate() {
+        t.vca = t.vca.filter(|&v| {
+            kinds.get(v) == Some(&TrackKind::Vca) && v != i && t.kind != TrackKind::Vca
+        });
+    }
     p.tracks = tracks;
     // A hand-edited file cannot nest tracks deeper than the folders above them allow.
     p.normalize_nesting();
     p.playing = false;
     p.recording = false;
+    // The notes of Pattern and Drummer regions are the ones the file holds.
+    p.stamp_generated();
     (p, warnings)
 }
 
@@ -502,6 +596,129 @@ fn curve_from_name(name: &str) -> FadeCurve {
         "s_curve" => FadeCurve::SCurve,
         _ => FadeCurve::EqualPower,
     }
+}
+
+fn pattern_to_doc(p: &PatternParams) -> PatternDoc {
+    PatternDoc {
+        steps: p.steps,
+        rate: p.rate.name().into(),
+        swing: p.swing,
+        gate: p.gate,
+        rows: p
+            .rows
+            .iter()
+            .map(|r| PatternRowDoc {
+                pitch: r.pitch,
+                // Trailing steps that are as a new step is are not written.
+                steps: trimmed(&r.steps, 0),
+                chance: trimmed(&r.chance, 100),
+                tie: trimmed(&r.tie, false),
+                repeat: trimmed(&r.repeat, 1),
+            })
+            .collect(),
+        direction: p.direction.name().into(),
+        seed: p.seed,
+    }
+}
+
+/// `list` without the values at its end that are `default`.
+fn trimmed<T: PartialEq + Copy>(list: &[T], default: T) -> Vec<T> {
+    let end = list
+        .iter()
+        .rposition(|v| *v != default)
+        .map_or(0, |i| i + 1);
+    list[..end].to_vec()
+}
+
+fn drummer_to_doc(d: &DrummerParams) -> DrummerDoc {
+    DrummerDoc {
+        style: d.style.name().into(),
+        complexity: d.complexity,
+        loudness: d.loudness,
+        swing: d.swing,
+        fills: d.fills,
+        parts: d.parts,
+        seed: d.seed,
+    }
+}
+
+/// The settings a region document holds for a Pattern or Drummer region, repaired. The key of
+/// the notes is set once the whole project is built (`Project::stamp_generated`).
+fn generated_from_doc(r: &RegionDoc) -> Option<Generated> {
+    if let Some(d) = &r.pattern {
+        let mut p = PatternParams {
+            steps: d.steps,
+            rate: StepRate::from_name(&d.rate),
+            swing: d.swing,
+            gate: d.gate,
+            rows: d
+                .rows
+                .iter()
+                .take(MAX_ROWS)
+                .map(|row| PatternRow {
+                    pitch: row.pitch,
+                    steps: row.steps.iter().copied().take(MAX_STEPS).collect(),
+                    chance: row.chance.iter().copied().take(MAX_STEPS).collect(),
+                    tie: row.tie.iter().copied().take(MAX_STEPS).collect(),
+                    repeat: row.repeat.iter().copied().take(MAX_STEPS).collect(),
+                })
+                .collect(),
+            direction: Direction::from_name(&d.direction),
+            seed: d.seed,
+        };
+        p.tidy();
+        return Some(Generated::new(Generator::Pattern(p)));
+    }
+    r.drummer.as_ref().map(|d| {
+        let mut p = DrummerParams {
+            style: DrumStyle::from_name(&d.style),
+            complexity: d.complexity,
+            loudness: d.loudness,
+            swing: d.swing,
+            fills: d.fills,
+            parts: d.parts,
+            seed: d.seed,
+        };
+        p.tidy();
+        Generated::new(Generator::Drummer(p))
+    })
+}
+
+/// How a SMPTE frame rate is written in the project file.
+pub fn smpte_rate_name(r: SmpteRate) -> &'static str {
+    match r {
+        SmpteRate::Fps24 => "24",
+        SmpteRate::Fps25 => "25",
+        SmpteRate::Fps29_97NonDrop => "29.97",
+        SmpteRate::Fps29_97Drop => "29.97df",
+        SmpteRate::Fps30 => "30",
+    }
+}
+
+fn smpte_rate_from_name(name: &str) -> SmpteRate {
+    SmpteRate::ALL
+        .into_iter()
+        .find(|r| smpte_rate_name(*r) == name)
+        .unwrap_or(SmpteRate::Fps25)
+}
+
+/// A start time that exists at `rate`: hours under 24, minutes and seconds under 60, frames
+/// under the rate's count, and no frame label that drop frame skips.
+pub fn valid_smpte_start(start: [u8; 4], rate: SmpteRate) -> [u8; 4] {
+    let [h, m, s, f] = start;
+    let (h, m, s) = (h.min(23), m.min(59), s.min(59));
+    let mut f = f.min(rate.nominal_fps() as u8 - 1);
+    if rate.is_drop_frame() && s == 0 && m % 10 != 0 && f < 2 {
+        f = 2;
+    }
+    [h, m, s, f]
+}
+
+/// A MIDI port name as stored: not too long, and not empty.
+fn port_name(name: &Option<String>) -> Option<String> {
+    name.as_ref()
+        .map(|n| n.chars().take(128).collect::<String>())
+        .filter(|n| !n.is_empty())
 }
 
 /// Root of all extracted project media.
@@ -605,15 +822,305 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn vca_assignments_are_saved_and_hand_edits_cannot_break_them() {
+        let mut p = Project::empty();
+        p.tracks.clear();
+        p.tracks.push(Track::new("Inst", TrackKind::Instrument));
+        p.tracks.push(Track::new("VCA 1", TrackKind::Vca));
+        p.tracks.push(Track::new("Inst 2", TrackKind::Instrument));
+        assert!(p.assign_vca(0, Some(1)));
+        p.tracks[1].volume_db = -4.0;
+        let (doc, media) = to_doc(&p);
+        assert_eq!(doc.tracks[0].vca, Some(1));
+        let _ = media;
+        let (q, _) = from_doc(&doc, Path::new("."), &egui::Context::default());
+        assert_eq!(q.tracks[1].kind, TrackKind::Vca);
+        assert_eq!(q.tracks[0].vca, Some(1));
+        assert_eq!(q.tracks[1].volume_db, -4.0);
+        // Pointing at a track that is not a VCA, at itself, at nothing, or a VCA at a VCA.
+        let mut bad = doc.clone();
+        bad.tracks[0].vca = Some(2);
+        bad.tracks[2].vca = Some(2);
+        bad.tracks[1].vca = Some(1);
+        let (r, _) = from_doc(&bad, Path::new("."), &egui::Context::default());
+        assert!(r.tracks.iter().all(|t| t.vca.is_none()));
+        bad.tracks[0].vca = Some(99);
+        let (r, _) = from_doc(&bad, Path::new("."), &egui::Context::default());
+        assert_eq!(r.tracks[0].vca, None);
+    }
+
+    #[test]
+    fn external_midi_tracks_keep_their_port_and_channel() {
+        let mut p = Project::empty();
+        p.tracks.clear();
+        let mut t = Track::new("Synth", TrackKind::ExternalMidi);
+        t.midi_port = Some("USB MIDI Interface".into());
+        t.midi_channel = 10;
+        p.tracks.push(t);
+        p.tracks.push(Track::new("Piano", TrackKind::Instrument));
+        let (doc, _) = to_doc(&p);
+        let (q, _) = from_doc(&doc, Path::new("."), &egui::Context::default());
+        assert_eq!(q.tracks[0].kind, TrackKind::ExternalMidi);
+        assert_eq!(q.tracks[0].midi_port.as_deref(), Some("USB MIDI Interface"));
+        assert_eq!(q.tracks[0].midi_channel, 10);
+        assert!(q.tracks[0].kind.has_regions());
+        assert_eq!(
+            (q.tracks[1].midi_port.clone(), q.tracks[1].midi_channel),
+            (None, 1)
+        );
+        // A hand-edited file cannot give a channel the MIDI cable does not have.
+        let mut bad = doc.clone();
+        bad.tracks[0].midi_channel = 99;
+        bad.tracks[1].midi_channel = 0;
+        bad.tracks[0].midi_port = Some(String::new());
+        let (r, _) = from_doc(&bad, Path::new("."), &egui::Context::default());
+        assert_eq!(
+            (r.tracks[0].midi_channel, r.tracks[1].midi_channel),
+            (16, 1)
+        );
+        assert_eq!(r.tracks[0].midi_port, None);
+    }
+
+    #[test]
+    fn hand_edited_signature_changes_are_sorted_and_cleaned() {
+        let mut doc = to_doc(&Project::empty()).0;
+        doc.sig_changes = [(9, 7, 8), (1, 5, 4), (3, 0, 3), (3, 6, 8), (100_000, 2, 4)]
+            .into_iter()
+            .map(|(bar, num, den)| SigChangeDoc { bar, num, den })
+            .collect();
+        let (p, _) = from_doc(&doc, Path::new("."), &egui::Context::default());
+        let got: Vec<(u32, u8, u8)> = p
+            .sig_changes
+            .iter()
+            .map(|c| (c.bar, c.num, c.den))
+            .collect();
+        // Bar 1 and bars past the limit are dropped, a bad signature is repaired, and two
+        // changes on one bar leave one.
+        assert_eq!(got, vec![(3, 1, 4), (9, 7, 8)]);
+    }
+
+    #[test]
     fn hand_edited_tempo_changes_are_sorted_and_cleaned() {
         let mut doc = to_doc(&Project::empty()).0;
         doc.tempo_changes = [(64.0, 90.0), (0.0, 50.0), (16.0, f32::NAN), (8.0, 2000.0)]
             .into_iter()
-            .map(|(beat, bpm)| TempoChangeDoc { beat, bpm })
+            .map(|(beat, bpm)| TempoChangeDoc {
+                beat,
+                bpm,
+                ramp: true,
+            })
             .collect();
         let (p, _) = from_doc(&doc, Path::new("."), &egui::Context::default());
         let got: Vec<(f64, f32)> = p.tempo_changes.iter().map(|t| (t.beat, t.bpm)).collect();
         assert_eq!(got, vec![(8.0, 990.0), (64.0, 90.0)]);
+        assert!(
+            !p.tempo_changes.last().is_some_and(|t| t.ramp),
+            "the last change has nothing to ramp to"
+        );
+    }
+
+    #[test]
+    fn pattern_and_drummer_regions_are_saved_with_their_settings_and_notes() {
+        use crate::model::Generator;
+        use crate::pattern::{parts, DrumStyle, StepRate};
+        let mut p = Project::empty();
+        let drums = p.add_track(TrackKind::Drummer);
+        let d = p.add_generated_region(drums, true, 2.0).unwrap();
+        let q = p.add_generated_region(drums, false, 8.0).unwrap();
+        if let Some(Generator::Drummer(params)) = p.tracks[drums].regions[d]
+            .generated
+            .as_mut()
+            .map(|g| &mut g.source)
+        {
+            params.style = DrumStyle::Funk;
+            params.complexity = 77;
+            params.seed = 12345;
+            params.parts = parts::ALL & !parts::TOMS;
+        }
+        p.regenerate(drums, d);
+        if let Some(Generator::Pattern(pattern)) = p.tracks[drums].regions[q]
+            .generated
+            .as_mut()
+            .map(|g| &mut g.source)
+        {
+            pattern.steps = 12;
+            pattern.rate = StepRate::EighthTriplet;
+            pattern.rows[0].steps[11] = 64;
+            pattern.rows[0].chance[3] = 40;
+            pattern.rows[0].tie[5] = true;
+            pattern.rows[1].repeat[2] = 3;
+            pattern.direction = crate::pattern::Direction::PingPong;
+            pattern.seed = 99;
+        }
+        p.regenerate(drums, q);
+
+        let (doc, _) = to_doc(&p);
+        let r = &doc.tracks[drums].regions;
+        assert_eq!(
+            r[d].drummer.as_ref().map(|x| x.style.as_str()),
+            Some("funk")
+        );
+        assert!(r[d].pattern.is_none() && r[q].drummer.is_none());
+        assert_eq!(r[q].pattern.as_ref().map(|x| x.rate.as_str()), Some("1/8T"));
+        let (back, _) = from_doc(&doc, Path::new("."), &egui::Context::default());
+        for ri in [d, q] {
+            let (a, b) = (
+                &p.tracks[drums].regions[ri],
+                &back.tracks[drums].regions[ri],
+            );
+            assert_eq!(
+                a.generated.as_ref().map(|g| &g.source),
+                b.generated.as_ref().map(|g| &g.source)
+            );
+            assert_eq!(a.notes, b.notes, "the notes are the ones that were saved");
+        }
+        // Opening does not remake the notes, and a different length does.
+        let mut back = back;
+        assert!(!back.refresh_generated());
+        back.tracks[drums].regions[d].len_bars = 6.0;
+        assert!(back.refresh_generated());
+        // Hand-edited files: nothing breaks.
+        let mut bad = doc.clone();
+        bad.tracks[drums].regions[q].pattern = Some(prowave_project::PatternDoc {
+            steps: 9999,
+            rate: "weird".into(),
+            swing: f32::NAN,
+            gate: -4.0,
+            direction: "sideways".into(),
+            seed: 3,
+            rows: (0..40)
+                .map(|_| prowave_project::PatternRowDoc {
+                    pitch: 200,
+                    steps: vec![255; 500],
+                    chance: vec![255; 500],
+                    tie: vec![true; 500],
+                    repeat: vec![0; 500],
+                })
+                .collect(),
+        });
+        bad.tracks[drums].regions[d].drummer = Some(prowave_project::DrummerDoc {
+            style: "polka".into(),
+            complexity: 255,
+            parts: 255,
+            ..Default::default()
+        });
+        let (fixed, _) = from_doc(&bad, Path::new("."), &egui::Context::default());
+        match fixed.tracks[drums].regions[q]
+            .generated
+            .as_ref()
+            .map(|g| &g.source)
+        {
+            Some(Generator::Pattern(x)) => {
+                assert_eq!((x.steps, x.rows.len()), (64, 16));
+                assert_eq!(x.rate, StepRate::Sixteenth);
+                assert!(x.rows.iter().all(|r| r.pitch == 127 && r.steps.len() == 64));
+                assert!(x.rows.iter().all(
+                    |r| r.chance.iter().all(|c| *c == 100) && r.repeat.iter().all(|c| *c == 1)
+                ));
+                assert_eq!(x.direction, crate::pattern::Direction::Forward);
+            }
+            other => panic!("{other:?}"),
+        }
+        match fixed.tracks[drums].regions[d]
+            .generated
+            .as_ref()
+            .map(|g| &g.source)
+        {
+            Some(Generator::Drummer(x)) => {
+                assert_eq!((x.complexity, x.parts), (100, 63));
+                assert_eq!(x.style, DrumStyle::Rock);
+            }
+            other => panic!("{other:?}"),
+        }
+        // A file from before these regions has neither.
+        assert!(RegionDoc::default().pattern.is_none() && RegionDoc::default().drummer.is_none());
+    }
+
+    #[test]
+    fn midi_fx_are_saved_in_order_and_unknown_ones_are_dropped() {
+        use crate::midi_fx::{ArpPattern, FxSlot, MidiFx};
+        let mut p = Project::demo();
+        p.tracks[0].midi_fx = vec![
+            FxSlot {
+                fx: MidiFx::Arpeggiator {
+                    rate: crate::pattern::StepRate::Eighth,
+                    pattern: ArpPattern::UpDown,
+                    octaves: 2,
+                    gate: 60,
+                },
+                on: true,
+            },
+            FxSlot {
+                fx: MidiFx::Transposer { semitones: -5 },
+                on: false,
+            },
+        ];
+        let (mut doc, _) = to_doc(&p);
+        assert_eq!(doc.tracks[0].midi_fx[0].kind, "arpeggiator");
+        let (q, _) = from_doc(&doc, Path::new("."), &egui::Context::default());
+        assert_eq!(q.tracks[0].midi_fx, p.tracks[0].midi_fx);
+        assert!(q.tracks[1].midi_fx.is_empty(), "older files have none");
+        doc.tracks[0].midi_fx.insert(
+            1,
+            prowave_project::MidiFxDoc {
+                kind: "from the future".into(),
+                ..Default::default()
+            },
+        );
+        let (r, _) = from_doc(&doc, Path::new("."), &egui::Context::default());
+        assert_eq!(r.tracks[0].midi_fx, p.tracks[0].midi_fx);
+    }
+
+    #[test]
+    fn tempo_curves_and_smpte_settings_are_saved() {
+        let mut p = Project::empty();
+        p.tempo = 100.0;
+        p.add_tempo_change(16.0, 140.0);
+        p.add_tempo_change(32.0, 90.0);
+        p.set_tempo_ramp(0, true);
+        p.set_tempo_ramp(1, true);
+        let (doc, _) = to_doc(&p);
+        let (q, _) = from_doc(&doc, Path::new("."), &egui::Context::default());
+        assert!(q.tempo_ramp && q.tempo_changes[0].ramp && !q.tempo_changes[1].ramp);
+        assert_eq!(q.tempo_points(), p.tempo_points());
+        assert_eq!(q.tempo_at(8.0), 120.0, "halfway up the first curve");
+        // A file from before tempo curves has none.
+        let old = ProjectDoc::default();
+        assert!(!old.tempo_ramp);
+
+        // SMPTE and MIDI Time Code settings.
+        p.smpte_rate = SmpteRate::Fps29_97Drop;
+        p.smpte_start = [10, 5, 3, 7];
+        p.mtc_out = Some("Out Port".into());
+        p.mtc_in = Some("In Port".into());
+        let (doc, _) = to_doc(&p);
+        assert_eq!(doc.smpte_rate, "29.97df");
+        let (q, _) = from_doc(&doc, Path::new("."), &egui::Context::default());
+        assert_eq!(q.smpte_rate, SmpteRate::Fps29_97Drop);
+        assert_eq!(q.smpte_start, [10, 5, 3, 7]);
+        assert_eq!(q.mtc_out.as_deref(), Some("Out Port"));
+        assert_eq!(q.mtc_in.as_deref(), Some("In Port"));
+        for rate in SmpteRate::ALL {
+            assert_eq!(smpte_rate_from_name(smpte_rate_name(rate)), rate);
+        }
+        // Hand-edited values are repaired: a rate that does not exist, a start that does not
+        // exist, a drop-frame label that is skipped.
+        let mut bad = doc.clone();
+        bad.smpte_rate = "48".into();
+        bad.smpte_start = [99, 99, 99, 99];
+        bad.mtc_out = Some(String::new());
+        let (q, _) = from_doc(&bad, Path::new("."), &egui::Context::default());
+        assert_eq!(q.smpte_rate, SmpteRate::Fps25);
+        assert_eq!(q.smpte_start, [23, 59, 59, 24]);
+        assert_eq!(q.mtc_out, None);
+        assert_eq!(
+            valid_smpte_start([0, 1, 0, 0], SmpteRate::Fps29_97Drop),
+            [0, 1, 0, 2]
+        );
+        assert_eq!(
+            valid_smpte_start([0, 10, 0, 0], SmpteRate::Fps29_97Drop),
+            [0, 10, 0, 0]
+        );
     }
 
     #[test]
@@ -625,12 +1132,15 @@ pub(crate) mod tests {
         p.add_tempo_change(32.0, 140.0);
         let m = p.add_marker(16.0);
         p.markers[m].name = "Chorus".into();
+        p.set_signature_from(9, (3, 4));
+        p.set_signature_from(17, (7, 8));
         p.cycle = true;
         p.tracks[0].regions[0].params.transpose = 5;
         p.tracks[4].regions[0].params.gain_db = -3.5;
         p.tracks[4].regions[0].params.fade_in = 2.0;
         p.tracks[4].regions[0].params.fade_curve = FadeCurve::SCurve;
         p.tracks[4].regions[0].params.reverse = true;
+        p.tracks[4].regions[0].params.crossfade = true;
         p.tracks[0].params.key_limit = (40, 90);
         p.tracks[1].category = Some("Piano");
         p.tracks[2].send.pre = true;
@@ -655,6 +1165,11 @@ pub(crate) mod tests {
         assert_eq!((q.tempo, q.cycle), (101.0, true));
         assert_eq!(q.tempo_changes, p.tempo_changes, "the Tempo track is saved");
         assert_eq!(q.markers, p.markers, "and the Marker track");
+        assert_eq!(
+            (q.sig, q.sig_changes.clone()),
+            (p.sig, p.sig_changes.clone()),
+            "and the Signature track"
+        );
         assert_eq!(q.tracks.len(), p.tracks.len());
         assert_eq!(
             q.tracks[0].regions[0].notes.len(),

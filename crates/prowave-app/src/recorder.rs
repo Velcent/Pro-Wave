@@ -67,7 +67,8 @@ impl Recorder {
 
 /// The track to record on: the selected one if it is an instrument, else the first instrument.
 fn record_track(p: &Project) -> Option<usize> {
-    let is_midi = |t: &crate::model::Track| matches!(t.kind, TrackKind::Instrument);
+    let is_midi =
+        |t: &crate::model::Track| matches!(t.kind, TrackKind::Instrument | TrackKind::ExternalMidi);
     p.tracks
         .get(p.selected_track)
         .filter(|t| is_midi(t))
@@ -115,7 +116,6 @@ fn start(rec: &mut Recorder, p: &mut Project, pedal: u8) -> Outcome {
         p.recording = false;
         return Outcome::NoTrack;
     };
-    let bpb = p.beats_per_bar();
     // With the Cycle on, recording from inside it fills the cycle: each pass is a take.
     let cycle = (p.cycle
         && p.cycle_end > p.cycle_start
@@ -127,10 +127,14 @@ fn start(rec: &mut Recorder, p: &mut Project, pedal: u8) -> Outcome {
         p.position_beats.max(0.0)
     };
     let name = format!("*{}", p.tracks[t].name);
+    let (start_bar, len_bars) = (
+        p.beats_to_bar(start) as f32 + 1.0,
+        cycle.map_or(0.01, |len| bars_between(p, start, len)),
+    );
     p.tracks[t].regions.push(Region {
         name,
-        start_bar: (start / bpb) as f32 + 1.0,
-        len_bars: cycle.map_or(0.01, |len| (len / bpb) as f32),
+        start_bar,
+        len_bars,
         notes: Vec::new(),
         // Logic begins every recording with the pedal's state.
         controls: vec![Control {
@@ -139,6 +143,7 @@ fn start(rec: &mut Recorder, p: &mut Project, pedal: u8) -> Outcome {
             val: pedal,
         }],
         folder: None,
+        generated: None,
         audio: None,
         params: RegionParams::default(),
     });
@@ -155,8 +160,13 @@ fn start(rec: &mut Recorder, p: &mut Project, pedal: u8) -> Outcome {
     Outcome::Started(t, r)
 }
 
+/// How many bars `len` quarter notes are when they start at `start` (a bar can be longer or
+/// shorter than the next when the signature changes).
+fn bars_between(p: &Project, start: f64, len: f64) -> f32 {
+    (p.beats_to_bar(start + len) - p.beats_to_bar(start)) as f32
+}
+
 fn record(rec: &mut Recorder, p: &mut Project, t: usize, r: usize, input: &[LiveNote]) {
-    let bpb = p.beats_per_bar();
     let raw = p.position_beats;
     let region = &mut p.tracks[t].regions[r];
     // The cycle jumped back: the pass is over and the next one is a new take.
@@ -214,7 +224,8 @@ fn record(rec: &mut Recorder, p: &mut Project, t: usize, r: usize, input: &[Live
         close(&mut region.notes[i], now);
     }
     if rec.cycle_len.is_none() {
-        region.len_bars = ((now / bpb) as f32).max(0.01);
+        let bars = bars_between(p, rec.start_beat, now).max(0.01);
+        p.tracks[t].regions[r].len_bars = bars;
     }
 }
 
@@ -236,7 +247,6 @@ fn finish(rec: &mut Recorder, p: &mut Project) -> Outcome {
     let cycle_len = rec.cycle_len.take();
     let earlier = std::mem::take(&mut rec.takes);
     p.recording = false;
-    let bpb = p.beats_per_bar();
     let mut now = (p.position_beats - rec.start_beat).max(0.0);
     if let Some(len) = cycle_len {
         now = now.min(len);
@@ -244,6 +254,7 @@ fn finish(rec: &mut Recorder, p: &mut Project) -> Outcome {
     if !is_recording_region(p, t, r) {
         return Outcome::Finished(None);
     }
+    let bars_between_len = cycle_len.map_or(0.0, |len| bars_between(p, rec.start_beat, len));
     let region = &mut p.tracks[t].regions[r];
     for i in open.into_values() {
         close(&mut region.notes[i], now);
@@ -256,7 +267,7 @@ fn finish(rec: &mut Recorder, p: &mut Project) -> Outcome {
             controls: std::mem::take(&mut region.controls),
         });
         takes.retain(|t| !t.notes.is_empty());
-        region.len_bars = (len / bpb) as f32;
+        region.len_bars = bars_between_len;
         region.name = region.name.trim_start_matches('*').to_string();
         match takes.len() {
             0 => {
@@ -288,7 +299,9 @@ fn finish(rec: &mut Recorder, p: &mut Project) -> Outcome {
         .map(|n| (n.start + n.len) as f64)
         .chain(region.controls.iter().map(|c| c.start as f64))
         .fold(now, f64::max);
-    region.len_bars = (end / bpb).ceil().max(1.0) as f32;
+    let end_bars = bars_between(p, rec.start_beat, end);
+    let region = &mut p.tracks[t].regions[r];
+    region.len_bars = end_bars.ceil().max(1.0);
     region.name = region.name.trim_start_matches('*').to_string();
     p.song_rev += 1;
     Outcome::Finished(Some((t, r)))
@@ -529,6 +542,7 @@ mod tests {
             notes: Vec::new(),
             controls: Vec::new(),
             folder: None,
+            generated: None,
             audio: None,
             params: RegionParams::default(),
         });

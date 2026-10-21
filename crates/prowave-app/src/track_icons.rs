@@ -24,6 +24,10 @@ pub enum IconKind {
     Aux,
     /// Folder (track stack).
     Folder,
+    /// VCA: three faders on a purple tile.
+    Vca,
+    /// External MIDI: a five-pin MIDI socket on an orange tile.
+    ExternalMidi,
 }
 
 /// Icon drawn for a track (header, Library, inspector). As in Logic, a software instrument
@@ -34,6 +38,10 @@ pub fn track_icon(t: &Track) -> IconKind {
         IconKind::Aux
     } else if t.kind == TrackKind::Folder {
         IconKind::Folder
+    } else if t.kind == TrackKind::Vca {
+        IconKind::Vca
+    } else if t.kind == TrackKind::ExternalMidi {
+        IconKind::ExternalMidi
     } else if t.kind == TrackKind::Instrument && t.category.is_none() {
         IconKind::Note
     } else {
@@ -250,6 +258,8 @@ pub fn draw_icon(g: &Painter, r: Rect, kind: IconKind) {
         IconKind::Strings => violin(&pen),
         IconKind::Aux => aux(&pen),
         IconKind::Folder => folder(&pen),
+        IconKind::Vca => vca(&pen),
+        IconKind::ExternalMidi => external_midi(&pen),
     }
 }
 
@@ -338,6 +348,57 @@ fn aux(p: &Pen) {
     }
     p.line(&[(3.0, -6.0), (8.0, 0.0), (3.0, 6.0)], 1.6, teal);
     p.line(&[(8.0, 0.0), (13.0, 0.0)], 1.6, teal);
+}
+
+/// VCA: a dark purple tile with three faders at different heights.
+fn vca(p: &Pen) {
+    p.rect(
+        -16.0,
+        -12.0,
+        16.0,
+        12.0,
+        rgb(0x4a, 0x38, 0x66),
+        rgb(0x32, 0x24, 0x48),
+    );
+    let ink = rgb(0xc2, 0x9a, 0xf0);
+    for (x, knob) in [(-8.0, -3.0), (0.0, 4.0), (8.0, -6.0)] {
+        p.line(&[(x, -9.0), (x, 9.0)], 1.2, rgb(0x7a, 0x62, 0xa0));
+        p.rect(
+            x - 3.5,
+            knob - 2.0,
+            x + 3.5,
+            knob + 2.0,
+            ink,
+            rgb(0x9c, 0x78, 0xd0),
+        );
+    }
+}
+
+/// External MIDI: a dark orange tile with a five-pin DIN socket.
+fn external_midi(p: &Pen) {
+    p.rect(
+        -16.0,
+        -12.0,
+        16.0,
+        12.0,
+        rgb(0x66, 0x40, 0x22),
+        rgb(0x48, 0x2c, 0x14),
+    );
+    let ink = rgb(0xf0, 0xa8, 0x5c);
+    let ring: Vec<(f32, f32)> = (0..=24)
+        .map(|k| {
+            let a = k as f32 / 24.0 * std::f32::consts::TAU;
+            (9.0 * a.cos(), 9.0 * a.sin())
+        })
+        .collect();
+    p.line(&ring, 1.4, ink);
+    // Five pins on the upper half of the socket.
+    for k in 0..5 {
+        let a = std::f32::consts::PI * (1.0 + k as f32 / 4.0);
+        let (x, y) = (5.2 * a.cos(), 5.2 * a.sin() + 1.5);
+        p.rect(x - 0.9, y - 0.9, x + 0.9, y + 0.9, ink, ink);
+    }
+    p.line(&[(-3.0, 7.0), (3.0, 7.0)], 1.4, ink);
 }
 
 /// Folder: a grey-blue folder with a tab.

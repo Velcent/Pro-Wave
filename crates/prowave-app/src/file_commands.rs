@@ -358,6 +358,9 @@ mod tests {
             shots: None,
             frames_since_record: 0,
             midi: None,
+            midi_out: None,
+            mtc_in: None,
+            chase: crate::mtc_in::Chase::default(),
             updater: crate::updater::Updater::new(),
         }
     }
@@ -583,6 +586,6 @@ mod tests {
         a.project.sig = (4, 4);
         a.open(&dir.path().join("Waltz.prowave"), &ctx);
         assert_eq!(a.project.sig, (6, 8));
-        assert_eq!(a.project.beats_per_bar(), 3.0);
+        assert_eq!(a.project.bar_len(0), 3.0);
     }
 }

@@ -1,9 +1,11 @@
 //! The Tempo track (Logic Pro: Global Tracks > Tempo), shown above the tracks with Track > Show
-//! Tempo Track. Each point is a tempo change that holds until the next one; the first point is
-//! the tempo at the start of the song.
+//! Tempo Track. Each point is a tempo change that holds until the next one, or, with a tempo
+//! curve, moves in a straight line to it; the first point is the tempo at the start of the song.
 //!
 //! - Double-click an empty spot: new tempo change there (snapped to the grid).
 //! - Drag a point: up/down changes its tempo, left/right moves it (not past its neighbours).
+//! - Right-click a point > Ramp to Next Tempo Change / Hold Tempo Until Next Change: makes the
+//!   tempo curve to the next point, or hold.
 //! - Double-click a point, or right-click > Delete Tempo Change: removes it.
 use crate::i18n::tr;
 use crate::model::{Project, MAX_BPM, MIN_BPM};
@@ -11,6 +13,9 @@ use crate::widgets::{context_click, context_menu};
 use egui::{pos2, vec2, Align2, Color32, FontId, Rect, Sense, Shape, Stroke, Ui};
 
 /// Height of the Tempo track, in points.
+/// The closest two tempo points may be, in quarter notes.
+const MIN_GAP: f64 = 0.25;
+
 pub const HEIGHT: f32 = 46.0;
 
 const LINE: Color32 = Color32::from_rgb(0x5f, 0xc8, 0x6a);
@@ -45,7 +50,7 @@ fn bpm_of(y: f32, lane: Rect, (lo, hi): (f32, f32)) -> f32 {
 }
 
 /// Draws the Tempo track's `header` and `lane` and handles its editing. `x_of` / `beat_of`
-/// convert between beats and screen x as in the Tracks area; `step` is the snap in beats.
+/// convert between beats and screen x as in the Tracks area; `snap` snaps a position.
 pub fn show(
     ui: &Ui,
     p: &mut Project,
@@ -53,9 +58,8 @@ pub fn show(
     lane: Rect,
     x_of: impl Fn(f64) -> f32,
     beat_of: impl Fn(f32) -> f64,
-    step: f64,
+    snap: &dyn Fn(f64) -> f64,
 ) {
-    let snap = |b: f64| crate::tracks_area::snap_to(b, step);
     // Keep the range still while a point is dragged, so the point stays under the pointer.
     let range_id = egui::Id::unique("tempo_track_range");
     let dragging = ui.ctx().dragged_id().is_some_and(|d| {
@@ -108,33 +112,43 @@ pub fn show(
         }
     }
 
-    // ---- the tempo line: a step graph, each tempo holding until the next change
-    let points: Vec<(f64, f32)> = std::iter::once((0.0, p.tempo))
-        .chain(p.tempo_changes.iter().map(|t| (t.beat, t.bpm)))
-        .collect();
+    // ---- the tempo line: each tempo holds until the next change, or on a tempo curve moves
+    // in a straight line to it
+    let all = p.tempo_points();
+    let points: Vec<(f64, f32)> = all.iter().map(|t| (t.beat, t.bpm)).collect();
     let mut line = Vec::with_capacity(points.len() * 2 + 1);
+    // Each segment's fill is one convex piece: a rectangle for a step, a trapezoid for a curve.
     for (i, &(beat, bpm)) in points.iter().enumerate() {
         let y = y_of(bpm, lane, r);
-        line.push(pos2(x_of(beat), y));
-        let end = points
-            .get(i + 1)
-            .map_or(lane.right() + 1.0, |&(b, _)| x_of(b));
-        line.push(pos2(end, y));
-    }
-    // Draw the fill as one rectangle per step (the polygon is not convex).
-    for w in line.chunks(2) {
-        if let [a, b] = w {
-            g.rect_filled(
-                Rect::from_min_max(pos2(a.x, a.y), pos2(b.x, lane.bottom())),
-                0.0,
-                FILL,
-            );
+        let x0 = x_of(beat);
+        let a = pos2(x0, y);
+        line.push(a);
+        let (end, end_y) = match points.get(i + 1) {
+            Some(&(b, next_bpm)) if all[i].ramp => (x_of(b), y_of(next_bpm, lane, r)),
+            Some(&(b, _)) => (x_of(b), y),
+            None => (lane.right() + 1.0, y),
+        };
+        let b = pos2(end, end_y);
+        // A step is two points at the same height; a curve goes straight to the next point,
+        // which pushes its own start.
+        if end_y == y {
+            line.push(b);
         }
+        // Only the stretches in view are filled.
+        if b.x < lane.left() || a.x > lane.right() {
+            continue;
+        }
+        g.add(Shape::convex_polygon(
+            vec![a, b, pos2(b.x, lane.bottom()), pos2(a.x, lane.bottom())],
+            FILL,
+            Stroke::NONE,
+        ));
     }
     g.add(Shape::line(line, Stroke::new(1.5, LINE)));
 
     // ---- points
     let mut delete = None;
+    let mut ramp_change = None;
     for (i, &(beat, bpm)) in points.iter().enumerate() {
         let at = pos2(x_of(beat), y_of(bpm, lane, r));
         if at.x < lane.left() - 6.0 || at.x > lane.right() + 6.0 {
@@ -159,8 +173,8 @@ pub fn show(
                     // Between its neighbours, so the order of the changes never flips.
                     let prev = points[i - 1].0;
                     let next = points.get(i + 1).map_or(f64::INFINITY, |n| n.0);
-                    let lo = prev + step.max(1e-3);
-                    let hi = next - step.max(1e-3);
+                    let lo = prev + MIN_GAP;
+                    let hi = next - MIN_GAP;
                     let beat = if lo <= hi {
                         snap(beat_of(pt.x)).clamp(lo, hi)
                     } else {
@@ -177,13 +191,25 @@ pub fn show(
         if i > 0 && resp.double_clicked() {
             delete = Some(i - 1);
         }
-        if i > 0 {
-            context_menu(&resp, |ui| {
-                if ui.button(tr("Delete Tempo Change")).clicked() {
-                    delete = Some(i - 1);
+        let has_next = i + 1 < points.len();
+        let ramps = all[i].ramp;
+        context_menu(&resp, |ui| {
+            if has_next {
+                let text = if ramps {
+                    tr("Hold Tempo Until Next Change")
+                } else {
+                    tr("Ramp to Next Tempo Change")
+                };
+                if ui.button(text).clicked() {
+                    ramp_change = Some((i, !ramps));
+                    ui.close();
                 }
-            });
-        }
+            }
+            if i > 0 && ui.button(tr("Delete Tempo Change")).clicked() {
+                delete = Some(i - 1);
+                ui.close();
+            }
+        });
         let hot = resp.hovered() || resp.dragged() || context_click(&resp);
         g.circle_filled(at, if hot { 4.5 } else { 3.5 }, LINE);
         if hot || resp.dragged() {
@@ -196,9 +222,13 @@ pub fn show(
             );
         }
     }
+    if let Some((i, ramp)) = ramp_change {
+        p.set_tempo_ramp(i, ramp);
+    }
     if let Some(i) = delete {
         if i < p.tempo_changes.len() {
             p.tempo_changes.remove(i);
+            p.tidy_tempo();
         }
     }
 

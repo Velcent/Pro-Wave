@@ -16,24 +16,39 @@ mod inspector;
 mod library;
 mod marker_track;
 mod menus;
+mod midi_file;
+mod midi_fx;
+mod midi_fx_ui;
 mod midi_in;
+mod midi_out;
 mod mixer;
 mod model;
+mod mtc_in;
 mod native_menu;
 mod note_edit;
 mod patches;
+mod pattern;
 mod piano_roll;
 mod project_io;
 mod recent_files;
 mod recorder;
+mod score;
+mod scripter;
+mod signature_track;
 mod start_screen;
+mod step_editor;
+mod sync_menu;
 mod takes;
 mod tempo_track;
 mod theme;
 mod track_icons;
 mod tracks_area;
+mod transform;
+mod transform_ui;
 mod transport;
 mod ui_scale;
+#[cfg(test)]
+mod ui_test;
 mod undo;
 mod updater;
 mod widgets;
@@ -68,6 +83,19 @@ pub struct UiState {
     pub inspector: inspector::InspectorView,
     pub library: library::LibraryView,
     pub piano: piano_roll::PianoView,
+    /// The MIDI FX window of the selected track is open.
+    pub show_midi_fx: bool,
+    /// The MIDI Transform window.
+    pub transform: transform_ui::TransformView,
+    /// The editor panel shows the Score instead of the Piano Roll for ordinary MIDI regions.
+    pub score_tab: bool,
+    pub score: score::ScoreView,
+    /// A note the Score just added is sounding: its pitch and when it stops.
+    pub score_heard: Option<(u8, f64)>,
+    /// File > Import > MIDI File… or Export > Selection as MIDI File…, run after the menus.
+    pub midi_cmd: Option<midi_file::MidiCmd>,
+    /// The Pattern and Drummer editors, which take the Piano Roll's place for those regions.
+    pub steps: step_editor::StepView,
     /// True while the pointer is over the Piano Roll (it owns Delete/Cmd+R then).
     pub piano_focus: bool,
     /// Live notes from the Piano Roll, forwarded to the engine every frame.
@@ -115,6 +143,13 @@ impl UiState {
             inspector: inspector::InspectorView::default(),
             library: library::LibraryView::default(),
             piano: piano_roll::PianoView::default(),
+            steps: step_editor::StepView::default(),
+            show_midi_fx: false,
+            transform: transform_ui::TransformView::default(),
+            score_tab: false,
+            score: score::ScoreView::default(),
+            score_heard: None,
+            midi_cmd: None,
             piano_focus: false,
             audition: Vec::new(),
             file_cmd: None,
@@ -165,12 +200,61 @@ struct App {
     frames_since_record: u32,
     /// The MIDI keyboard (none while benchmarking).
     midi: Option<midi_in::MidiIn>,
+    /// Sends the notes of External MIDI tracks to their ports (none while benchmarking).
+    midi_out: Option<midi_out::MidiOut>,
+    /// Reads MIDI Time Code from the project's port (none while benchmarking).
+    mtc_in: Option<mtc_in::MtcIn>,
+    /// Makes the transport follow that time code.
+    chase: mtc_in::Chase,
     /// Looks for a newer release and installs it (Windows).
     updater: updater::Updater,
 }
 
 impl App {
+    /// File > Import > MIDI File… and File > Export > Selection as MIDI File…
+    fn run_midi_cmd(&mut self, cmd: midi_file::MidiCmd) {
+        let (p, s) = (&mut self.project, &mut self.ui);
+        match cmd {
+            midi_file::MidiCmd::Import => {
+                let picked = rfd::FileDialog::new()
+                    .add_filter(i18n::tr("MIDI File"), &["mid", "midi", "smf"])
+                    .pick_file();
+                if let Some(path) = picked {
+                    s.status = Some(match midi_file::import_path(p, &path) {
+                        Ok(n) => i18n::trf("imported {} tracks from {}", &[&n, &path.display()]),
+                        Err(e) => i18n::trf("cannot import {}: {}", &[&path.display(), &e]),
+                    });
+                }
+            }
+            midi_file::MidiCmd::Export => {
+                // The selected region, or all the MIDI of the project.
+                let only = s.tracks.selected.filter(|(t, r)| {
+                    p.tracks.get(*t).is_some_and(|tr| {
+                        tr.kind != model::TrackKind::Audio && *r < tr.regions.len()
+                    })
+                });
+                let picked = rfd::FileDialog::new()
+                    .add_filter(i18n::tr("MIDI File"), &["mid"])
+                    .set_file_name(format!("{}.mid", p.name))
+                    .save_file();
+                if let Some(path) = picked {
+                    s.status = Some(match midi_file::export_path(p, only, &path) {
+                        Ok(()) => i18n::trf("saved {}", &[&path.display()]),
+                        Err(e) => i18n::trf("cannot write {}: {}", &[&path.display(), &e]),
+                    });
+                }
+            }
+        }
+    }
+
     fn import(&mut self, path: &std::path::Path, ctx: &egui::Context) {
+        if midi_file::is_midi_path(path) {
+            self.ui.status = Some(match midi_file::import_path(&mut self.project, path) {
+                Ok(n) => i18n::trf("imported {} tracks from {}", &[&n, &path.display()]),
+                Err(e) => i18n::trf("cannot import {}: {}", &[&path.display(), &e]),
+            });
+            return;
+        }
         if !import::is_audio_path(path) {
             self.ui.status = Some(i18n::trf("not an audio file: {}", &[&path.display()]));
             return;
@@ -228,6 +312,26 @@ impl App {
         self.ui.can_redo = self.history.can_redo();
     }
 
+    /// MIDI Time Code in: the transport follows the port the project chases, if any.
+    fn follow_time_code(&mut self, ctx: &egui::Context) {
+        let Some(input) = self.mtc_in.as_mut() else {
+            return;
+        };
+        input.sync(self.project.mtc_in.as_deref());
+        // The keyboard input does not take the port the time code comes from.
+        if let Some(midi) = self.midi.as_mut() {
+            midi.avoid(self.project.mtc_in.as_deref());
+        }
+        let mut events = Vec::new();
+        input.poll(&mut events);
+        self.chase
+            .update(&mut self.project, &events, std::time::Instant::now());
+        if self.chase.is_following() {
+            // Look again soon enough to notice when the time code stops.
+            ctx.request_repaint_after(mtc_in::STALL / 3);
+        }
+    }
+
     /// MIDI keyboard notes: play them on the selected instrument and, while recording, put
     /// them into the new region.
     fn play_and_record_midi(&mut self, ctx: &egui::Context) {
@@ -250,7 +354,7 @@ impl App {
                 recorder::LiveNote::On { pitch, vel } => piano_roll::Audition::On {
                     pitch,
                     vel,
-                    track: track.min(255) as u8,
+                    track: track.min(usize::from(u16::MAX)) as u16,
                 },
                 recorder::LiveNote::Off { pitch } => piano_roll::Audition::Off { pitch },
                 // The engine has no sustain pedal yet: it is only recorded.
@@ -317,6 +421,7 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let _frame_time = bench::frame_timer();
         let dt = ctx.input(|i| i.stable_dt) as f64;
         ui_scale::apply(&ctx, self.ui.ui_scale);
         tracks_area::poll_normalize(&ctx, &mut self.project, &mut self.ui);
@@ -356,6 +461,12 @@ impl eframe::App for App {
         for path in dropped {
             self.import(&path, &ctx);
         }
+        if let Some(out) = self.midi_out.as_mut() {
+            out.sync(&self.project);
+        }
+        self.follow_time_code(&ctx);
+        // Pattern and Drummer regions follow their length and the bars under them.
+        self.project.refresh_generated();
         if let Some(sync) = self.sync.as_mut() {
             sync.sync(&mut self.project);
             if sync.needs_retry() {
@@ -377,8 +488,8 @@ impl eframe::App for App {
         if self.project.playing {
             ctx.request_repaint();
         }
-        let master_peaks = self.sync.as_ref().map(|s| s.master_peaks());
-        let meters = match self.sync.as_ref() {
+        let master_peaks = self.sync.as_mut().map(|s| s.master_peaks());
+        let meters = match self.sync.as_mut() {
             Some(sync) => mixer::Meters {
                 tracks: sync.track_meters(self.project.tracks.len()),
                 master: sync.master_peaks(),
@@ -478,6 +589,11 @@ impl eframe::App for App {
         if let Some(cmd) = self.ui.file_cmd.take() {
             self.run_file_cmd(cmd, &ctx);
         }
+        if let Some(cmd) = self.ui.midi_cmd.take() {
+            self.run_midi_cmd(cmd);
+        }
+        midi_fx_ui::show(&ctx, &mut self.project, &mut self.ui);
+        transform_ui::show(&ctx, &mut self.project, &mut self.ui);
         self.show_save_prompt(&ctx);
         self.show_revert_prompt(&ctx);
         self.track_history(&ctx);
@@ -584,8 +700,18 @@ fn main() -> eframe::Result {
                     Project::empty()
                 };
             let mut audio_error = None;
+            let mut midi_out = None;
             let sync = match prowave_engine::Engine::start() {
-                Ok(e) => Some(engine_sync::EngineSync::new(e, &project)),
+                Ok(e) => {
+                    let mut sync = engine_sync::EngineSync::new(e, &project);
+                    if !measuring {
+                        midi_out = sync
+                            .take_midi_out()
+                            .zip(sync.take_mtc_out())
+                            .map(|(notes, mtc)| midi_out::MidiOut::start(notes, mtc));
+                    }
+                    Some(sync)
+                }
                 Err(err) => {
                     tracing::warn!("audio disabled: {err}");
                     audio_error =
@@ -605,6 +731,9 @@ fn main() -> eframe::Result {
                 shots: shots_dir.clone().map(bench::LayoutShots::new),
                 frames_since_record: 0,
                 midi: (!measuring).then(midi_in::MidiIn::new),
+                midi_out,
+                mtc_in: (!measuring).then(|| mtc_in::MtcIn::new(cc.egui_ctx.clone())),
+                chase: mtc_in::Chase::default(),
                 updater: updater::Updater::new(),
             };
             if !measuring {
@@ -616,10 +745,41 @@ fn main() -> eframe::Result {
                 app.native_menu = Some(native_menu::NativeMenu::install(&cc.egui_ctx));
             }
             app.ui.status = audio_error;
+            if let Some(n) = measuring
+                .then(|| {
+                    std::env::var("PROWAVE_BENCH_TRACKS")
+                        .ok()?
+                        .parse::<usize>()
+                        .ok()
+                })
+                .flatten()
+            {
+                app.project = bench::many_tracks(n.clamp(1, 1000));
+                app.saved = file_commands::content(&app.project);
+                app.history.reset(&app.project);
+            }
             if app.shots.is_some() {
                 // The pictures also show the Tempo track, with a few tempo changes.
                 app.ui.tracks.show_tempo = true;
                 app.ui.tracks.show_markers = true;
+                app.ui.tracks.show_signatures = true;
+                app.project.set_signature_from(5, (3, 4));
+                app.project.set_signature_from(9, (6, 8));
+                // A VCA and an External MIDI track near the front, to see their strips.
+                {
+                    use model::{Track, TrackKind};
+                    let pr = &mut app.project;
+                    pr.tracks.insert(1, Track::new("VCA 1", TrackKind::Vca));
+                    pr.vca_inserted(1);
+                    let mut ext = Track::new("External MIDI 1", TrackKind::ExternalMidi);
+                    ext.midi_port = Some("USB MIDI Interface".into());
+                    ext.midi_channel = 3;
+                    pr.tracks.insert(2, ext);
+                    pr.vca_inserted(2);
+                    pr.assign_vca(0, Some(1));
+                    pr.assign_vca(3, Some(1));
+                    pr.tracks[1].volume_db = -4.0;
+                }
                 if let Some(r) = app
                     .project
                     .tracks
@@ -629,13 +789,56 @@ fn main() -> eframe::Result {
                     r.params.fade_in = 4.0;
                     r.params.fade_out = 8.0;
                 }
-                let bpb = app.project.beats_per_bar();
                 for (bar, name) in [(0.0, "Intro"), (4.0, "Verse"), (12.0, "Chorus")] {
-                    let i = app.project.add_marker(bar * bpb);
+                    let i = app.project.add_marker(app.project.bar_to_beats(bar));
                     app.project.markers[i].name = name.into();
                 }
                 app.project.add_tempo_change(32.0, 132.0);
                 app.project.add_tempo_change(48.0, 104.0);
+                // A tempo curve from the first change to the second.
+                app.project.set_tempo_ramp(1, true);
+                // `PROWAVE_SHOT_SCENE=pattern` or `drummer` opens that editor on a new region
+                // of the Drummer track.
+                let scene = std::env::var("PROWAVE_SHOT_SCENE").unwrap_or_default();
+                if scene == "score" || scene == "midifx" {
+                    app.ui.tracks.selected = Some((0, 0));
+                    app.project.selected_track = 0;
+                    app.ui.bottom = Bottom::PianoRoll;
+                    app.ui.score_tab = true;
+                    app.ui.show_midi_fx = scene == "midifx";
+                    app.project.tracks[0].midi_fx = vec![
+                        midi_fx::FxSlot {
+                            fx: midi_fx::MidiFx::Arpeggiator {
+                                rate: pattern::StepRate::Eighth,
+                                pattern: midi_fx::ArpPattern::UpDown,
+                                octaves: 2,
+                                gate: 80,
+                            },
+                            on: true,
+                        },
+                        midi_fx::FxSlot {
+                            fx: midi_fx::MidiFx::Scale {
+                                root: 0,
+                                minor: true,
+                            },
+                            on: true,
+                        },
+                    ];
+                }
+                if scene == "pattern" || scene == "drummer" {
+                    let pr = &mut app.project;
+                    if let Some(t) = pr
+                        .tracks
+                        .iter()
+                        .position(|t| t.kind == model::TrackKind::Drummer)
+                    {
+                        if let Some(ri) = pr.add_generated_region(t, scene == "drummer", 40.0) {
+                            pr.selected_track = t;
+                            app.ui.tracks.selected = Some((t, ri));
+                            app.ui.bottom = Bottom::PianoRoll;
+                        }
+                    }
+                }
                 app.saved = file_commands::content(&app.project);
                 app.history.reset(&app.project);
             }

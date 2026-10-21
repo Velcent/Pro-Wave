@@ -529,7 +529,16 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, rect: Rect, cpu_load: f32) {
     let bot = rect.center().y + 1.0;
     let x0 = rect.left();
 
-    // Column 1: SMPTE over bars/beats.
+    // Column 1: SMPTE over bars/beats. Right-click the time for its frame rate and the MIDI
+    // Time Code ports.
+    let smpte = ui
+        .interact(
+            Rect::from_min_size(pos2(x0 + 4.0, rect.top()), vec2(150.0, bot - rect.top())),
+            egui::Id::unique(("control_bar", "smpte")),
+            Sense::click(),
+        )
+        .on_hover_text(tr("Right-click for the SMPTE and synchronization settings"));
+    crate::widgets::context_menu(&smpte, |ui| crate::sync_menu::items(ui, p));
     let mut job = LayoutJob::default();
     lcd_seg(&mut job, &p.timecode(), 0, 18.0, pal.text, pal.dim);
     g.galley(pos2(x0 + 8.0, top), g.layout_job(job), pal.text);
@@ -609,13 +618,17 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, rect: Rect, cpu_load: f32) {
         };
         ui.data_mut(|d| d.insert_temp(id, leftover));
         if steps != 0 {
-            p.step_signature(part, steps);
+            let bar0 = p.beats_to_bar(p.position_beats) as u32;
+            p.step_signature_at(bar0, part, steps);
         }
     }
     g.text(
         pos2(sig_x, top),
         Align2::CENTER_TOP,
-        format!("{}/{}", p.sig.0, p.sig.1),
+        {
+            let (num, den) = p.signature_of_bar(p.beats_to_bar(p.position_beats) as u32);
+            format!("{num}/{den}")
+        },
         FontId::proportional(18.0),
         pal.text,
     );
@@ -857,10 +870,17 @@ pub fn control_bar(
 
     let tx = |dx: f32| pos2(lcd_rect.left() + dx, cy);
     if tbutton(ui, &g, tx(-198.0), "rew", icon_rewind, None, ICON) {
-        p.position_beats = (p.position_beats - p.beats_per_bar()).max(0.0);
+        // Back to the start of this bar, or of the one before when already there.
+        let bar = p.beats_to_bar(p.position_beats);
+        let back = if bar.fract() < 1e-6 {
+            bar - 1.0
+        } else {
+            bar.floor()
+        };
+        p.position_beats = p.bar_to_beats(back.max(0.0));
     }
     if tbutton(ui, &g, tx(-170.0), "ffw", icon_forward, None, ICON) {
-        p.position_beats += p.beats_per_bar();
+        p.position_beats = p.next_bar_start(p.position_beats);
     }
     if tbutton(ui, &g, tx(-142.0), "start", icon_to_start, None, ICON) {
         p.position_beats = 0.0;

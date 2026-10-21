@@ -4,7 +4,7 @@
 
 use crate::recorder::LiveNote;
 use midir::{MidiInput, MidiInputConnection};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 
 /// How often to look for a MIDI keyboard while none is connected.
@@ -13,7 +13,10 @@ const RESCAN: Duration = Duration::from_secs(3);
 pub struct MidiIn {
     connection: Option<MidiInputConnection<()>>,
     port: Option<String>,
-    tx: Sender<LiveNote>,
+    /// A port another input uses (MIDI Time Code): this one leaves it alone, since some systems
+    /// let only one program or connection open a port.
+    avoided: Option<String>,
+    tx: SyncSender<LiveNote>,
     rx: Receiver<LiveNote>,
     last_try: Option<Instant>,
 }
@@ -40,10 +43,12 @@ pub fn parse(msg: &[u8]) -> Option<LiveNote> {
 
 impl MidiIn {
     pub fn new() -> Self {
-        let (tx, rx) = channel();
+        // Bounded: a device that floods the port cannot fill the memory.
+        let (tx, rx) = sync_channel(4096);
         let mut midi = Self {
             connection: None,
             port: None,
+            avoided: None,
             tx,
             rx,
             last_try: None,
@@ -58,6 +63,21 @@ impl MidiIn {
         self.port.as_deref()
     }
 
+    /// Keeps away from the port named `name` (or stops doing so with `None`): a connection to
+    /// it is closed, and the keyboard is looked for on the other ports.
+    pub fn avoid(&mut self, name: Option<&str>) {
+        if self.avoided.as_deref() == name {
+            return;
+        }
+        self.avoided = name.map(str::to_string);
+        if self.port.is_some() && self.port == self.avoided {
+            self.connection = None;
+            self.port = None;
+        }
+        // Look again at once: the port that was avoided may be the keyboard.
+        self.last_try = None;
+    }
+
     fn connect(&mut self) {
         self.last_try = Some(Instant::now());
         let Ok(input) = MidiInput::new("Pro Wave") else {
@@ -66,7 +86,8 @@ impl MidiIn {
         let ports = input.ports();
         let picked = ports.iter().find_map(|port| {
             let name = input.port_name(port).ok()?;
-            (!name.to_lowercase().contains("through")).then_some((port, name))
+            (!name.to_lowercase().contains("through") && self.avoided.as_deref() != Some(&name))
+                .then_some((port, name))
         });
         let Some((port, name)) = picked else {
             return;
@@ -77,7 +98,7 @@ impl MidiIn {
             "prowave-in",
             move |_stamp, msg, _| {
                 if let Some(note) = parse(msg) {
-                    let _ = tx.send(note);
+                    let _ = tx.try_send(note);
                 }
             },
             (),

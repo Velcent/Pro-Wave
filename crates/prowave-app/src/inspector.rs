@@ -421,11 +421,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
         let audio = has && is_audio;
         let (start_beat, len_beats) = sel.map_or((0.0, 0.0), |(t, r)| {
             let reg = &p.tracks[t].regions[r];
-            let bpb = p.beats_per_bar();
-            (
-                (reg.start_bar as f64 - 1.0) * bpb,
-                reg.len_bars as f64 * bpb,
-            )
+            (p.region_start_beats(reg), p.region_len_beats(reg))
         });
         let bpm = p.tempo_at(start_beat);
         label(&g, left, y, tr("Gain:"), audio);
@@ -506,6 +502,12 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
         label(&g, left, y, tr("Reverse:"), audio);
         if checkbox(ui, &g, pos2(vx, y), "region_reverse", params.reverse, audio) {
             params.reverse = !params.reverse;
+        }
+        y += ROW_H;
+        // Crossfades with the audio region this one overlaps (Drag: X-Fade sets it too).
+        label(&g, left, y, &format!("{}:", tr("X-Fade")), audio);
+        if checkbox(ui, &g, pos2(vx, y), "region_xfade", params.crossfade, audio) {
+            params.crossfade = !params.crossfade;
         }
         y += ROW_H;
 
@@ -627,12 +629,70 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
             );
             y += ROW_H;
         } else {
+            let external = p.tracks[ti].kind == TrackKind::ExternalMidi;
+            if external {
+                // Where this track's notes go: a MIDI output port and a channel.
+                label(&g, left, y, tr("MIDI Out Port:"), true);
+                let port = p.tracks[ti]
+                    .midi_port
+                    .clone()
+                    .unwrap_or_else(|| tr("No Port").to_string());
+                if let Some(resp) = popup(
+                    ui,
+                    &g,
+                    Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0)),
+                    "midi_out_port",
+                    &port,
+                    true,
+                ) {
+                    egui::Popup::menu(&resp).show(|ui| {
+                        let current = p.tracks[ti].midi_port.clone();
+                        if ui
+                            .selectable_label(current.is_none(), tr("No Port"))
+                            .clicked()
+                        {
+                            p.tracks[ti].midi_port = None;
+                            ui.close();
+                        }
+                        for name in crate::midi_out::ports() {
+                            if ui
+                                .selectable_label(current.as_deref() == Some(&name), &name)
+                                .clicked()
+                            {
+                                p.tracks[ti].midi_port = Some(name);
+                                ui.close();
+                            }
+                        }
+                    });
+                }
+                y += ROW_H;
+                label(&g, left, y, tr("MIDI Out Channel:"), true);
+                let r = Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0));
+                let channel = p.tracks[ti].midi_channel.clamp(1, 16);
+                if let Some(v) = drag_value(
+                    ui,
+                    &g,
+                    r,
+                    "midi_out_channel",
+                    channel as i32,
+                    (1, 16),
+                    1,
+                    channel.to_string(),
+                    true,
+                ) {
+                    p.tracks[ti].midi_channel = v as u8;
+                }
+                y += ROW_H;
+            }
             for (t, v) in [
                 (tr("MIDI In Port:"), tr("All")),
                 (tr("MIDI In Channel:"), tr("All")),
                 (tr("MIDI Out Channel:"), tr("All")),
                 (tr("Freeze Mode:"), tr("Pre Fader")),
-            ] {
+            ]
+            .into_iter()
+            .filter(|(t, _)| !(external && *t == tr("MIDI Out Channel:")))
+            {
                 label(&g, left, y, t, false);
                 popup(
                     ui,

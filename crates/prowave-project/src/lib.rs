@@ -39,6 +39,10 @@ pub enum TrackKindDoc {
     Aux,
     /// Folder (track stack): groups the tracks nested under it, has no sound of its own.
     Folder,
+    /// VCA: a fader (with Mute and Solo) that moves the level of the tracks assigned to it.
+    Vca,
+    /// External MIDI: plays its notes on a MIDI port and channel instead of in the app.
+    ExternalMidi,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
@@ -106,6 +110,88 @@ pub struct RegionDoc {
     pub fade_out: f32,
     pub fade_curve: String,
     pub reverse: bool,
+    /// Crossfade with the audio region it overlaps (Drag: X-Fade): this region fades in over
+    /// the overlap while the earlier one fades out.
+    pub crossfade: bool,
+    /// A Pattern region: the steps that make its `notes`.
+    pub pattern: Option<PatternDoc>,
+    /// A Drummer region: the settings that make its `notes`.
+    pub drummer: Option<DrummerDoc>,
+}
+
+/// The steps of a Pattern region.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct PatternDoc {
+    /// Steps in one run of the pattern (1-64).
+    pub steps: usize,
+    /// Length of a step: "1/4", "1/8", "1/16", "1/32", "1/8T" or "1/16T".
+    pub rate: String,
+    /// Fraction of a step every second step is pushed back (0-0.5).
+    pub swing: f32,
+    /// Fraction of a step a note lasts (0.05-1).
+    pub gate: f32,
+    pub rows: Vec<PatternRowDoc>,
+    /// "forward", "backward", "ping_pong" or "random".
+    pub direction: String,
+    pub seed: u32,
+}
+
+impl Default for PatternDoc {
+    fn default() -> Self {
+        Self {
+            steps: 16,
+            rate: "1/16".into(),
+            swing: 0.0,
+            gate: 0.9,
+            rows: Vec::new(),
+            direction: "forward".into(),
+            seed: 1,
+        }
+    }
+}
+
+/// A pitch of a pattern and the velocity of each of its steps (0 = off).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct PatternRowDoc {
+    pub pitch: u8,
+    pub steps: Vec<u8>,
+    /// Chance (percent) each step plays; empty when every step always plays.
+    pub chance: Vec<u8>,
+    /// Which steps are tied to the one before; empty when none is.
+    pub tie: Vec<bool>,
+    /// How many times each step repeats; empty when none does.
+    pub repeat: Vec<u8>,
+}
+
+/// The settings of a Drummer region.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct DrummerDoc {
+    /// "rock", "pop", "funk", "jazz", "hip_hop" or "electronic".
+    pub style: String,
+    pub complexity: u8,
+    pub loudness: u8,
+    pub swing: u8,
+    pub fills: u8,
+    /// The kit pieces that play, one bit each: kick, snare, hi-hat, toms, cymbals, percussion.
+    pub parts: u8,
+    pub seed: u32,
+}
+
+impl Default for DrummerDoc {
+    fn default() -> Self {
+        Self {
+            style: "rock".into(),
+            complexity: 50,
+            loudness: 60,
+            swing: 0,
+            fills: 30,
+            parts: 63,
+            seed: 1,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -136,7 +222,37 @@ pub struct TrackDoc {
     pub indent: u8,
     /// A `Folder` track whose tracks are hidden in the Tracks area.
     pub folded: bool,
+    /// The `Vca` track (its index in `tracks`) that controls this track's level.
+    pub vca: Option<usize>,
+    /// External MIDI tracks: the MIDI output port (by name) and the channel, 1-16.
+    pub midi_port: Option<String>,
+    pub midi_channel: u8,
+    /// MIDI FX, first to last.
+    pub midi_fx: Vec<MidiFxDoc>,
     pub regions: Vec<RegionDoc>,
+}
+
+/// One MIDI FX of a track: its kind ("transposer", "velocity", "scale", "chord", "repeater",
+/// "arpeggiator" or "randomizer"), whether it is on and its settings as numbers.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct MidiFxDoc {
+    pub kind: String,
+    pub on: bool,
+    pub settings: Vec<f32>,
+    /// The program of a "scripter".
+    pub script: String,
+}
+
+impl Default for MidiFxDoc {
+    fn default() -> Self {
+        Self {
+            kind: String::new(),
+            on: true,
+            settings: Vec::new(),
+            script: String::new(),
+        }
+    }
 }
 
 impl Default for TrackDoc {
@@ -162,6 +278,10 @@ impl Default for TrackDoc {
             height: 1.0,
             indent: 0,
             folded: false,
+            vca: None,
+            midi_port: None,
+            midi_channel: 1,
+            midi_fx: Vec::new(),
             regions: Vec::new(),
         }
     }
@@ -186,8 +306,29 @@ pub struct ProjectDoc {
     pub tracks: Vec<TrackDoc>,
     /// Tempo changes after the start (Tempo track); `tempo` is the tempo at the start.
     pub tempo_changes: Vec<TempoChangeDoc>,
+    /// Whether the start tempo ramps to the first tempo change (a tempo curve).
+    pub tempo_ramp: bool,
     /// Marker track.
     pub markers: Vec<MarkerDoc>,
+    /// Signature track: time-signature changes after bar 1 (`sig` is the first bar's).
+    pub sig_changes: Vec<SigChangeDoc>,
+    /// SMPTE frame rate: "24", "25", "29.97" (non-drop), "29.97df" (drop frame) or "30".
+    pub smpte_rate: String,
+    /// SMPTE time of the project start: hours, minutes, seconds, frames.
+    pub smpte_start: [u8; 4],
+    /// MIDI output port (by name) that sends MIDI Time Code, if any.
+    pub mtc_out: Option<String>,
+    /// MIDI input port (by name) that Pro Wave chases MIDI Time Code from, if any.
+    pub mtc_in: Option<String>,
+}
+
+/// A time-signature change: `num/den` from the start of the 1-based `bar` on.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct SigChangeDoc {
+    pub bar: u32,
+    pub num: u8,
+    pub den: u8,
 }
 
 /// A marker from `beat` (quarter notes from the start) on.
@@ -205,6 +346,8 @@ pub struct MarkerDoc {
 pub struct TempoChangeDoc {
     pub beat: f64,
     pub bpm: f32,
+    /// Moves in a straight line to the next change's tempo instead of holding (a tempo curve).
+    pub ramp: bool,
 }
 
 impl Default for ProjectDoc {
@@ -225,7 +368,13 @@ impl Default for ProjectDoc {
             selected_track: 0,
             tracks: Vec::new(),
             tempo_changes: Vec::new(),
+            tempo_ramp: false,
             markers: Vec::new(),
+            sig_changes: Vec::new(),
+            smpte_rate: "25".into(),
+            smpte_start: [1, 0, 0, 0],
+            mtc_out: None,
+            mtc_in: None,
         }
     }
 }

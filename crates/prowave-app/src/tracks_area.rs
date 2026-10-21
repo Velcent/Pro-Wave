@@ -93,6 +93,9 @@ impl DragMode {
     }
 }
 
+/// Where the Fade tool is in [`TOOLS`].
+const FADE_TOOL: usize = 9;
+
 pub(crate) const TOOLS: [&str; 14] = [
     "Pointer Tool",
     "Pencil Tool",
@@ -120,6 +123,14 @@ pub struct NormalizeJob {
     result: std::sync::mpsc::Receiver<Result<f32, String>>,
 }
 
+/// The tool the pointer has in the Tracks area (Logic's left-click tool).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TrackTool {
+    Pointer,
+    /// Drag on an audio region to set its fade in (left half) or fade out (right half).
+    Fade,
+}
+
 pub struct TracksView {
     /// Width of one bar in points (horizontal zoom).
     pub bar_w: f32,
@@ -129,11 +140,16 @@ pub struct TracksView {
     pub scroll_y: f32,
     pub snap: Snap,
     pub drag_mode: DragMode,
+    pub tool: TrackTool,
+    /// A Fade tool drag in progress: `true` for a fade in, `false` for a fade out.
+    fade_drag: Option<bool>,
     pub catch: bool,
     /// Global Tempo track above the tracks (Track > Show Tempo Track).
     pub show_tempo: bool,
     /// Global Marker track above the tracks (Track > Show Marker Track).
     pub show_markers: bool,
+    /// Global Signature track above the tracks (Track > Show Signature Track).
+    pub show_signatures: bool,
     /// (track, region)
     pub selected: Option<(usize, usize)>,
     /// Width of the lanes at the last frame (for Navigate > Zoom to Fit).
@@ -156,9 +172,12 @@ impl Default for TracksView {
             lanes_w: 1000.0,
             snap: Snap::Smart,
             drag_mode: DragMode::NoOverlap,
+            tool: TrackTool::Pointer,
+            fade_drag: None,
             catch: true,
             show_tempo: false,
             show_markers: false,
+            show_signatures: false,
             selected: None,
             grab_beats: 0.0,
             cycle_anchor: None,
@@ -171,7 +190,7 @@ impl Default for TracksView {
 /// True when another track is soloed and `track` is not: it is silent until solo is released
 /// (Logic plays only soloed tracks and greys the others' regions).
 pub(crate) fn silenced_by_solo(p: &Project, track: usize) -> bool {
-    p.tracks.get(track).is_some_and(|t| !t.solo) && p.tracks.iter().any(|t| t.solo)
+    p.tracks.get(track).is_some() && !p.is_soloed(track) && p.any_solo()
 }
 
 /// A region while it is being recorded.
@@ -241,6 +260,42 @@ fn row_at(rows: &[(f32, f32)], y: f32) -> Option<usize> {
 
 fn id(key: impl std::hash::Hash + std::fmt::Debug) -> egui::Id {
     egui::Id::unique(("tracks_area", key))
+}
+
+/// Whether the snap goes to bar lines (which is not a fixed step once signatures change).
+fn snaps_to_bars(snap: Snap, beat_px: f32, beat_unit: f64) -> bool {
+    match snap {
+        Snap::Bar => true,
+        Snap::Smart => beat_px * (beat_unit as f32) < 12.0,
+        _ => false,
+    }
+}
+
+/// Fade tool steps per quarter note (1/16 notes, as the Inspector's fades).
+const FADE_STEPS_PER_BEAT: f64 = 4.0;
+
+/// The fade (in quarter notes) the Fade tool sets when dragged to `at`, for a region that
+/// starts at `start` and is `len` long: from its start for a fade in, from its end for a fade
+/// out; in 1/16 notes and never longer than the region.
+fn fade_for_drag(at: f64, start: f64, len: f64, fade_in: bool) -> f32 {
+    let raw = if fade_in {
+        at - start
+    } else {
+        start + len - at
+    };
+    ((raw * FADE_STEPS_PER_BEAT).round().max(0.0) / FADE_STEPS_PER_BEAT).min(len) as f32
+}
+
+/// Whether region `ri` of track `ti` overlaps another region of the track.
+fn overlaps_another(p: &Project, ti: usize, ri: usize) -> bool {
+    let track = &p.tracks[ti];
+    let (s, e) = (
+        p.region_start_beats(&track.regions[ri]),
+        p.region_end_beats(&track.regions[ri]),
+    );
+    track.regions.iter().enumerate().any(|(j, o)| {
+        j != ri && p.region_start_beats(o) < e - 1e-9 && p.region_end_beats(o) > s + 1e-9
+    })
 }
 
 /// Snap step in beats (quarter notes) for the current setting and zoom. `beat_px` is pixels
@@ -430,6 +485,13 @@ fn draw_pointer(g: &Painter, at: Pos2, c: Color32) {
         at + vec2(-3.0, -7.0),
     ];
     g.add(Shape::line(pts, stroke(c)));
+}
+
+/// The Fade tool's icon: a ramp down to a baseline.
+fn draw_fade_tool(g: &Painter, at: Pos2, c: Color32) {
+    g.line_segment([at + vec2(-6.0, 5.0), at + vec2(6.0, 5.0)], stroke(c));
+    g.line_segment([at + vec2(-6.0, 5.0), at + vec2(-6.0, -5.0)], stroke(c));
+    g.line_segment([at + vec2(-6.0, -5.0), at + vec2(6.0, 5.0)], stroke(c));
 }
 
 fn draw_crosshair(g: &Painter, at: Pos2, c: Color32) {
@@ -648,7 +710,7 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
         rx = snap_menu(ui, &g, v, rx, cy);
     }
     if show.tools {
-        tool_menus(ui, &g, rx, cy);
+        tool_menus(ui, &g, v, rx, cy);
     }
 }
 
@@ -735,7 +797,7 @@ fn snap_menu(ui: &Ui, g: &Painter, v: &mut TracksView, rx: f32, cy: f32) -> f32 
 }
 
 /// Left-click and Command-click tool menus ending at `rx` (only the Pointer works so far).
-fn tool_menus(ui: &Ui, g: &Painter, rx: f32, cy: f32) {
+fn tool_menus(ui: &Ui, g: &Painter, v: &mut TracksView, rx: f32, cy: f32) {
     for (i, key) in ["tool_l", "tool_r"].iter().enumerate() {
         let r = Rect::from_min_size(
             pos2(rx - 40.0 - (1 - i) as f32 * 44.0, cy - 10.0),
@@ -746,7 +808,9 @@ fn tool_menus(ui: &Ui, g: &Painter, rx: f32, cy: f32) {
             g.rect_filled(r, 4.0, Color32::from_white_alpha(14));
         }
         let icon_at = pos2(r.left() + 13.0, cy);
-        if i == 0 {
+        if i == 0 && v.tool == TrackTool::Fade {
+            draw_fade_tool(g, icon_at, TEXT);
+        } else if i == 0 {
             draw_pointer(g, icon_at, TEXT);
         } else {
             draw_crosshair(g, icon_at, TEXT);
@@ -763,10 +827,22 @@ fn tool_menus(ui: &Ui, g: &Painter, rx: f32, cy: f32) {
         egui::Popup::menu(&resp).show(|ui| {
             ui.set_min_width(220.0);
             for (n, t) in TOOLS.iter().enumerate() {
-                if n == 0 {
-                    let _ = ui.selectable_label(true, tr(t));
-                } else {
-                    todo_item(ui, t);
+                let tool = match n {
+                    0 => Some(TrackTool::Pointer),
+                    FADE_TOOL => Some(TrackTool::Fade),
+                    _ => None,
+                };
+                match tool {
+                    Some(tool) if i == 0 => {
+                        if ui.selectable_label(v.tool == tool, tr(t)).clicked() {
+                            v.tool = tool;
+                            ui.close();
+                        }
+                    }
+                    Some(TrackTool::Pointer) => {
+                        let _ = ui.selectable_label(true, tr(t));
+                    }
+                    _ => todo_item(ui, t),
                 }
             }
         });
@@ -781,6 +857,8 @@ enum CtxAction {
     NewTrack(TrackKind),
     ZoomToFit,
     OpenPianoRoll,
+    /// A Pattern or Drummer region becomes an ordinary MIDI region.
+    ConvertToMidi(usize, usize),
     ToggleRegionMute(usize, usize),
     ToggleReverse(usize, usize),
     ToggleTakeFolder(usize, usize),
@@ -821,28 +899,40 @@ fn new_track_items(ui: &mut Ui, picked: &mut Option<CtxAction>) {
         (tr("New Software Instrument Track"), TrackKind::Instrument),
         (tr("New Audio Track"), TrackKind::Audio),
         (tr("New Aux Track"), TrackKind::Aux),
+        (tr("New VCA Track"), TrackKind::Vca),
+        (tr("New External MIDI Track"), TrackKind::ExternalMidi),
     ] {
         pick(ui, label, "", CtxAction::NewTrack(kind), picked);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn region_items(
     ui: &mut Ui,
     is_audio: bool,
     muted: bool,
     folder: Option<bool>,
+    generated: bool,
     ti: usize,
     ri: usize,
     picked: &mut Option<CtxAction>,
 ) {
     if !is_audio {
-        pick(
-            ui,
-            tr("Open in Piano Roll"),
-            "",
-            CtxAction::OpenPianoRoll,
-            picked,
-        );
+        let open = if generated {
+            tr("Open Editor")
+        } else {
+            tr("Open in Piano Roll")
+        };
+        pick(ui, open, "", CtxAction::OpenPianoRoll, picked);
+        if generated {
+            pick(
+                ui,
+                tr("Convert to MIDI Region"),
+                "",
+                CtxAction::ConvertToMidi(ti, ri),
+                picked,
+            );
+        }
         ui.separator();
     }
     if let Some(open) = folder {
@@ -961,6 +1051,7 @@ fn apply_ctx(action: CtxAction, p: &mut Project, s: &mut UiState, lanes_w: f32) 
         }
         CtxAction::ZoomToFit => zoom_to_fit(p, v, lanes_w),
         CtxAction::OpenPianoRoll => s.bottom = Bottom::PianoRoll,
+        CtxAction::ConvertToMidi(t, r) => p.convert_to_midi_region(t, r),
         CtxAction::ToggleRegionMute(t, r) => {
             if let Some(region) = p.tracks.get_mut(t).and_then(|t| t.regions.get_mut(r)) {
                 region.params.mute = !region.params.mute;
@@ -1144,9 +1235,9 @@ fn set_locators_by_region(p: &mut Project, v: &TracksView) {
     let Some(reg) = p.tracks.get(t).and_then(|tr| tr.regions.get(r)) else {
         return;
     };
-    let bpb = p.beats_per_bar();
-    p.cycle_start = (reg.start_bar as f64 - 1.0) * bpb;
-    p.cycle_end = p.cycle_start + reg.len_bars as f64 * bpb;
+    let (start, end) = (p.region_start_beats(reg), p.region_end_beats(reg));
+    p.cycle_start = start;
+    p.cycle_end = end;
     p.cycle = true;
 }
 
@@ -1471,6 +1562,7 @@ fn draw_region(
     full: Rect,
     track: &Track,
     region: &Region,
+    fades: (f32, f32),
     beat_px: f32,
     selected: bool,
     recording: bool,
@@ -1513,6 +1605,16 @@ fn draw_region(
     } else {
         body.lerp_to_gamma(Color32::WHITE, if selected { 0.7 } else { 0.85 })
     };
+    if let Some(generated) = &region.generated {
+        if head.width() > 44.0 {
+            draw_generated_mark(
+                g,
+                head,
+                matches!(generated.source, crate::model::Generator::Drummer(_)),
+                name_color,
+            );
+        }
+    }
     g.text(
         head.left_center() + vec2(5.0, 0.0),
         Align2::LEFT_CENTER,
@@ -1570,7 +1672,7 @@ fn draw_region(
         }
     }
     if edit {
-        draw_fades(g, rr, inner, full, region, beat_px);
+        draw_fades(g, rr, inner, full, region, fades, beat_px);
     }
     let border = if recording {
         Color32::from_rgb(120, 22, 22)
@@ -1591,6 +1693,30 @@ fn draw_region(
         );
     }
     g.rect_stroke(rr, 3.0, Stroke::new(1.0, border), StrokeKind::Inside);
+}
+
+/// A small mark at the right of a region's header that tells a Drummer region (a drum with
+/// its sticks) from a Pattern region (a grid of steps).
+fn draw_generated_mark(g: &Painter, head: Rect, drummer: bool, color: Color32) {
+    let c = pos2(head.right() - 10.0, head.center().y);
+    let stroke = Stroke::new(1.0, color);
+    if drummer {
+        g.rect_stroke(
+            Rect::from_center_size(c + vec2(0.0, 1.5), vec2(8.0, 4.5)),
+            1.0,
+            stroke,
+            StrokeKind::Middle,
+        );
+        g.line_segment([c + vec2(-4.0, -2.0), c + vec2(-1.0, -4.5)], stroke);
+        g.line_segment([c + vec2(4.0, -2.0), c + vec2(1.0, -4.5)], stroke);
+    } else {
+        for row in 0..2 {
+            for col in 0..3 {
+                let at = c + vec2(col as f32 * 3.6 - 3.6, row as f32 * 3.6 - 1.8);
+                g.rect_filled(Rect::from_center_size(at, vec2(2.6, 2.6)), 0.5, color);
+            }
+        }
+    }
 }
 
 /// Height (0.3..1.0) of a demo audio track's pseudo-waveform `beats` into its region. It
@@ -1622,8 +1748,15 @@ fn fake_waveform(g: &Painter, rect: Rect, x0: f32, beat_px: f32, col: Color32, s
 /// Real waveform from min/max peaks. `x0`/`full_w` describe the unclipped region.
 /// Shades what the region's fades take away: a triangle from the region's start up to where
 /// the fade in ends, and one down to the region's end for the fade out, with the curve's line.
-fn draw_fades(g: &Painter, rr: Rect, inner: Rect, full: Rect, region: &Region, beat_px: f32) {
-    let (fin, fout) = (region.params.fade_in, region.params.fade_out);
+fn draw_fades(
+    g: &Painter,
+    rr: Rect,
+    inner: Rect,
+    full: Rect,
+    region: &Region,
+    (fin, fout): (f32, f32),
+    beat_px: f32,
+) {
     if fin <= 0.0 && fout <= 0.0 {
         return;
     }
@@ -2020,7 +2153,12 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
     } else {
         0.0
     };
-    let tracks_y = ruler_y + RULER_H + marker_h + tempo_h;
+    let signature_h = if s.tracks.show_signatures {
+        crate::signature_track::HEIGHT
+    } else {
+        0.0
+    };
+    let tracks_y = ruler_y + RULER_H + marker_h + signature_h + tempo_h;
     let headers = Rect::from_min_max(
         pos2(area.left(), tracks_y),
         pos2(area.left() + HEADER_W, area.bottom()),
@@ -2037,8 +2175,8 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
 
     toolbar(ui, p, s, tb, lanes.width());
 
-    let bpb = p.beats_per_bar();
-    let unit = p.beat_unit();
+    // Zoom is counted in pixels per bar of the first bar's length.
+    let bpb = p.bar_len(0);
     let v = &mut s.tracks;
     v.lanes_w = lanes.width();
 
@@ -2080,8 +2218,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
     // ---- lanes background + grid
     let g = ui.painter_at(lanes);
     g.rect_filled(lanes, 0.0, LANE_BG);
-    let first_bar = (scroll_x / v.bar_w).floor() as i64;
-    let last_bar = ((scroll_x + lanes.width()) / v.bar_w).ceil() as i64;
+    let bars = p.bars_in(beat_of(lanes.left()), beat_of(lanes.right()));
     for (i, &(top, row_h)) in rows.iter().enumerate() {
         if row_h <= 0.0 {
             continue;
@@ -2099,15 +2236,15 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
             Stroke::new(1.0, Color32::from_gray(0x22)),
         );
     }
-    for b in first_bar..=last_bar {
-        let x = x_of(b as f64 * bpb);
+    for bar in &bars {
+        let x = x_of(bar.start);
         g.line_segment(
             [pos2(x, lanes.top()), pos2(x, lanes.bottom())],
             Stroke::new(1.0, Color32::from_gray(0x38)),
         );
-        if beat_px * unit as f32 >= 14.0 {
-            for k in 1..p.sig.0 {
-                let xb = x_of(b as f64 * bpb + k as f64 * unit);
+        if beat_px * bar.unit as f32 >= 14.0 {
+            for k in 1..bar.num {
+                let xb = x_of(bar.start + k as f64 * bar.unit);
                 g.line_segment(
                     [pos2(xb, lanes.top()), pos2(xb, lanes.bottom())],
                     Stroke::new(1.0, Color32::from_gray(0x30)),
@@ -2127,6 +2264,20 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
         }
         v.selected = None;
     }
+    // Double-click on an empty stretch of a Drummer track: a Drummer region there, as in Logic.
+    if lane_resp.double_clicked() {
+        if let Some(pt) = lane_resp.interact_pointer_pos() {
+            let drummer_row = row_at(&rows, pt.y - lanes.top() + scroll_y)
+                .filter(|row| p.tracks[*row].kind == TrackKind::Drummer);
+            if let Some(row) = drummer_row {
+                let bar = p.beats_to_bar(beat_of(pt.x)).floor() as f32 + 1.0;
+                if let Some(ri) = p.add_generated_region(row, true, bar) {
+                    p.selected_track = row;
+                    v.selected = Some((row, ri));
+                }
+            }
+        }
+    }
     context_menu(&lane_resp, |ui| {
         new_track_items(ui, &mut picked);
         ui.separator();
@@ -2136,7 +2287,17 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
     });
 
     // ---- regions
-    let step = snap_step(v.snap, beat_px, bpb, unit);
+    let step = snap_step(v.snap, beat_px, bpb, p.beat_unit_at(beat_of(lanes.left())));
+    // Snapping to bars follows the signature, so it goes to the nearest bar line.
+    let snap_bars = snaps_to_bars(v.snap, beat_px, p.beat_unit_at(beat_of(lanes.left())));
+    let sig_owned = p.sigs().to_owned();
+    let snap_pos = move |b: f64| -> f64 {
+        if snap_bars {
+            sig_owned.as_ref().nearest_bar_line(b)
+        } else {
+            snap_to(b, step)
+        }
+    };
     let mut moved = false;
     for (ti, &(top, row_h)) in rows.iter().enumerate() {
         if row_h <= 0.0 {
@@ -2148,8 +2309,8 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
         }
         let base_h = row_h - take_rows_height(&p.tracks[ti]);
         for ri in 0..p.tracks[ti].regions.len() {
-            let start_beat = (p.tracks[ti].regions[ri].start_bar as f64 - 1.0) * bpb;
-            let len_beats = p.tracks[ti].regions[ri].len_bars as f64 * bpb;
+            let start_beat = p.region_start_beats(&p.tracks[ti].regions[ri]);
+            let len_beats = p.region_len_beats(&p.tracks[ti].regions[ri]);
             let full = Rect::from_min_max(
                 pos2(x_of(start_beat), y + 1.0),
                 pos2(x_of(start_beat + len_beats), y + base_h - 1.0),
@@ -2166,27 +2327,71 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
             if resp.double_clicked() && p.tracks[ti].kind != TrackKind::Audio {
                 s.bottom = Bottom::PianoRoll;
             }
-            if resp.drag_started() {
-                if let Some(pt) = resp.interact_pointer_pos() {
-                    v.grab_beats = beat_of(pt.x) - start_beat;
-                }
+            let fade_tool = v.tool == TrackTool::Fade && p.tracks[ti].kind == TrackKind::Audio;
+            if fade_tool && resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
             }
-            if resp.dragged() {
-                if let Some(pt) = resp.interact_pointer_pos() {
-                    let nb = snap_to((beat_of(pt.x) - v.grab_beats).max(0.0), step);
-                    p.tracks[ti].regions[ri].start_bar = (nb / bpb) as f32 + 1.0;
+            if fade_tool {
+                // The Fade tool: the left half of the region gets a fade in, the right half a
+                // fade out, as long as the pointer is dragged (in 1/16 notes, as the Inspector).
+                if resp.drag_started() {
+                    if let Some(pt) = resp.interact_pointer_pos() {
+                        v.fade_drag = Some(beat_of(pt.x) < start_beat + len_beats / 2.0);
+                    }
                 }
-            }
-            if resp.drag_stopped() {
-                moved = true;
+                if let (true, Some(fade_in), Some(pt)) =
+                    (resp.dragged(), v.fade_drag, resp.interact_pointer_pos())
+                {
+                    let beats = fade_for_drag(beat_of(pt.x), start_beat, len_beats, fade_in);
+                    let params = &mut p.tracks[ti].regions[ri].params;
+                    if fade_in {
+                        params.fade_in = beats;
+                    } else {
+                        params.fade_out = beats;
+                    }
+                }
+                if resp.drag_stopped() {
+                    v.fade_drag = None;
+                    moved = true;
+                }
+            } else {
+                if resp.drag_started() {
+                    if let Some(pt) = resp.interact_pointer_pos() {
+                        v.grab_beats = beat_of(pt.x) - start_beat;
+                    }
+                }
+                if resp.dragged() {
+                    if let Some(pt) = resp.interact_pointer_pos() {
+                        let nb = snap_pos((beat_of(pt.x) - v.grab_beats).max(0.0));
+                        p.tracks[ti].regions[ri].start_bar = p.beats_to_bar(nb) as f32 + 1.0;
+                    }
+                }
+                if resp.drag_stopped() {
+                    moved = true;
+                    // Dropped on another audio region: X-Fade crossfades them, the other
+                    // modes leave them overlapping.
+                    if p.tracks[ti].kind == TrackKind::Audio && overlaps_another(p, ti, ri) {
+                        p.tracks[ti].regions[ri].params.crossfade = v.drag_mode == DragMode::XFade;
+                    }
+                }
             }
             let (is_audio, muted) = (
                 p.tracks[ti].kind == TrackKind::Audio,
                 p.tracks[ti].regions[ri].params.mute,
             );
             let folder_open = p.tracks[ti].regions[ri].folder.as_ref().map(|f| f.open);
+            let generated = p.tracks[ti].regions[ri].generated.is_some();
             context_menu(&resp, |ui| {
-                region_items(ui, is_audio, muted, folder_open, ti, ri, &mut picked);
+                region_items(
+                    ui,
+                    is_audio,
+                    muted,
+                    folder_open,
+                    generated,
+                    ti,
+                    ri,
+                    &mut picked,
+                );
             });
             let selected = v.selected == Some((ti, ri));
             if folder_open.is_some() {
@@ -2222,9 +2427,8 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                         let Some(folder) = region.folder.as_mut() else {
                             continue;
                         };
-                        let grab = |pt: egui::Pos2| {
-                            snap_to((beat_of(pt.x) - start_beat).max(0.0), step) as f32
-                        };
+                        let grab =
+                            |pt: egui::Pos2| snap_pos((beat_of(pt.x) - start_beat).max(0.0)) as f32;
                         if resp.drag_started() {
                             if let Some(pt) = resp.interact_pointer_pos() {
                                 v.swipe = Some((folder.comp.clone(), grab(pt)));
@@ -2273,6 +2477,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                 full,
                 tr,
                 &tr.regions[ri],
+                p.effective_fades(ti, ri),
                 beat_px,
                 selected,
                 rec_target == Some((ti, ri)),
@@ -2297,11 +2502,28 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
             Rect::from_min_max(pos2(lanes.left(), top), pos2(area.right(), top + marker_h)),
             x_of,
             beat_of,
-            step,
+            &snap_pos,
+        );
+    }
+    if signature_h > 0.0 {
+        let top = ruler_y + RULER_H + marker_h;
+        crate::signature_track::show(
+            ui,
+            p,
+            Rect::from_min_max(
+                pos2(area.left(), top),
+                pos2(headers.right(), top + signature_h),
+            ),
+            Rect::from_min_max(
+                pos2(lanes.left(), top),
+                pos2(area.right(), top + signature_h),
+            ),
+            x_of,
+            beat_of,
         );
     }
     if tempo_h > 0.0 {
-        let top = ruler_y + RULER_H + marker_h;
+        let top = ruler_y + RULER_H + marker_h + signature_h;
         crate::tempo_track::show(
             ui,
             p,
@@ -2309,7 +2531,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
             Rect::from_min_max(pos2(lanes.left(), top), pos2(area.right(), tracks_y)),
             x_of,
             beat_of,
-            step,
+            &snap_pos,
         );
     }
 
@@ -2465,6 +2687,11 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
     if dr.clicked() {
         if let Some(t) = p.tracks.get(p.selected_track).cloned() {
             p.tracks.insert(p.selected_track + 1, t);
+            p.vca_inserted(p.selected_track + 1);
+            // The copy keeps its VCA (the shift above also moved the copy's own entry).
+            let copy = p.selected_track + 1;
+            let vca = p.tracks[p.selected_track].vca;
+            p.tracks[copy].vca = vca;
             p.selected_track += 1;
             p.song_rev += 1;
         }
@@ -2498,10 +2725,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
     let selection = v
         .selected
         .and_then(|(t, r)| p.tracks.get(t)?.regions.get(r))
-        .map(|r| {
-            let start = (r.start_bar as f64 - 1.0) * bpb;
-            (start, start + r.len_bars as f64 * bpb)
-        });
+        .map(|r| (p.region_start_beats(r), p.region_end_beats(r)));
     if let Some((start, end)) = selection {
         let band = Rect::from_min_max(
             pos2(x_of(start).max(ruler.left()), ruler.top()),
@@ -2526,11 +2750,11 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
         .into_iter()
         .find(|n| *n as f32 * v.bar_w >= 34.0)
         .unwrap_or(64);
-    for b in first_bar..=last_bar {
-        let x = x_of(b as f64 * bpb);
-        let in_cycle =
-            p.cycle && (b as f64 * bpb) >= p.cycle_start && (b as f64 * bpb) < p.cycle_end;
-        let beat = b as f64 * bpb;
+    for bar in &bars {
+        let b = bar.bar0 as i64;
+        let x = x_of(bar.start);
+        let beat = bar.start;
+        let in_cycle = p.cycle && beat >= p.cycle_start && beat < p.cycle_end;
         let in_selection = selection.is_some_and(|(s0, s1)| beat >= s0 && beat < s1);
         let col = if in_cycle {
             Color32::from_gray(0x2a)
@@ -2557,9 +2781,9 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                 Stroke::new(1.0, col.gamma_multiply(0.6)),
             );
         }
-        if beat_px * unit as f32 >= 10.0 {
-            for k in 1..p.sig.0 {
-                let xb = x_of(b as f64 * bpb + k as f64 * unit);
+        if beat_px * bar.unit as f32 >= 10.0 {
+            for k in 1..bar.num {
+                let xb = x_of(bar.start + k as f64 * bar.unit);
                 gr.line_segment(
                     [pos2(xb, ruler.bottom() - 4.0), pos2(xb, ruler.bottom())],
                     Stroke::new(1.0, col.gamma_multiply(0.45)),
@@ -2574,13 +2798,13 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
     if up.drag_started() {
         v.cycle_anchor = up
             .interact_pointer_pos()
-            .map(|pt| snap_to(beat_of(pt.x), bpb));
+            .map(|pt| p.sigs().nearest_bar_line(beat_of(pt.x)));
     }
     if let (Some(anchor), true, Some(pt)) =
         (v.cycle_anchor, up.dragged(), up.interact_pointer_pos())
     {
-        let other = snap_to(beat_of(pt.x), bpb);
-        if (other - anchor).abs() >= bpb {
+        let other = p.sigs().nearest_bar_line(beat_of(pt.x));
+        if (other - anchor).abs() >= p.bar_len_at(anchor.min(other)) - 1e-9 {
             p.cycle_start = anchor.min(other);
             p.cycle_end = anchor.max(other);
             p.cycle = true;
@@ -2865,5 +3089,34 @@ mod row_tests {
         wait_for_normalize(&mut p, &mut s);
         assert!(p.tracks[t].regions.is_empty());
         assert_eq!(s.status, None);
+    }
+
+    #[test]
+    fn the_fade_tool_measures_from_the_edge_in_sixteenths() {
+        // A region from beat 8, 4 beats long.
+        assert_eq!(fade_for_drag(9.0, 8.0, 4.0, true), 1.0);
+        assert_eq!(
+            fade_for_drag(9.1, 8.0, 4.0, true),
+            1.0,
+            "snaps to 1/16 notes"
+        );
+        assert_eq!(fade_for_drag(9.2, 8.0, 4.0, true), 1.25);
+        assert_eq!(fade_for_drag(11.0, 8.0, 4.0, false), 1.0, "from the end");
+        assert_eq!(
+            fade_for_drag(7.0, 8.0, 4.0, true),
+            0.0,
+            "not before the start"
+        );
+        assert_eq!(
+            fade_for_drag(13.0, 8.0, 4.0, false),
+            0.0,
+            "not past the end"
+        );
+        assert_eq!(
+            fade_for_drag(30.0, 8.0, 4.0, true),
+            4.0,
+            "not longer than the region"
+        );
+        assert_eq!(fade_for_drag(-5.0, 8.0, 4.0, false), 4.0);
     }
 }

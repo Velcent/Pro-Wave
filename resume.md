@@ -11,7 +11,7 @@ scratch (vector shapes, own patch names); no Apple artwork or code is copied.
 | Phase | Status |
 |---|---|
 | **0 — Foundation** | **Mostly done.** CI is green on Linux, Windows and macOS. Missing: triple-buffer/`basedrop`, latency target (<20 ms) on Windows |
-| **1 — Engine core + tracks** | **About half done.** Tempo map (engine), audio/MIDI regions, streaming and `.prowave` files work. Missing: tempo track UI, Aux/VCA/Folder/External MIDI tracks, Pattern/Drummer regions, clip gain/fades/reverse/normalize, 1000-track streaming, 24-track DoD test |
+| **1 — Engine core + tracks** | **About half done.** Tempo map (engine), audio/MIDI regions, streaming and `.prowave` files work. Missing: the 24-track DoD test sign-off |
 | 2 — MIDI & sequencer | Started early: Piano Roll editing, quantize, velocity. Everything else missing |
 | 3 – 9 | Not started (some UI from Phase 4/8 — mixer look, Library — is drawn, without DSP) |
 
@@ -211,14 +211,14 @@ arrangement (48 busy voices, filtered saw/square + vibrato, drums, metronome, te
   shortcuts) are untested.
 - **Linux:** the binary starts and keeps running under a virtual display with software
   OpenGL on GitHub's runner. Sound and a real GPU have not been tried.
-- **More than 64 tracks:** the engine has 64 track slots; tracks 65+ share the last slot's
-  mixer settings (needs the Phase 1 track system).
+- **More than 1024 tracks:** the engine mixes 1024 tracks (1000 streaming audio tracks tested on
+  Windows); tracks after that are kept in the project but not played.
 - **Sends** are stored and shown but not routed in the engine (no buses yet).
 - **Plug-in slots** (EQ, Compressor, …) are labels only — no DSP effects yet.
 - The synth approximates instrument families; there are no sampled instruments.
 - **Fader cap:** you said it still differs from Logic — waiting for a zoomed Logic reference.
 - Undo/Redo, Cut/Copy/Paste and many menu items are shown **disabled** (not implemented).
-- Score, Step Sequencer and Smart Tempo tabs are placeholders.
+- The Score tab (notation: clefs, key signatures, rests, ties, bar-carried accidentals; not beams), the Step Sequencer tab (Pattern regions) and the Drummer Editor tab work; the Smart Tempo tab is a placeholder.
 - Cargo-deny ignores 4 "unmaintained" advisories (transitive via winit/egui on Linux,
   no fix available); documented in `deny.toml`.
 
@@ -242,11 +242,11 @@ arrangement (48 busy voices, filtered saw/square + vibrato, drums, metronome, te
 
 | Roadmap item | | What's there / what's missing |
 |---|---|---|
-| Transport: sample-accurate clock, tempo map, SMPTE sync | 🟡 | Engine tempo map with tempo + signature changes ✅. App: one tempo and one editable time signature (LCD drag), saved in `.prowave`, bars/beats/regions/grid/snap follow the signature (6/8 and 7/8 match the engine) ✅. **Missing:** Tempo/Signature tracks in the UI and several changes per song in `.prowave`, tempo curves, SMPTE via `TempoMap`, SMPTE sync |
-| Track types: Audio, Instrument, Aux, Master, VCA, Folder/Summing Stacks, External MIDI | 🟡 | Audio, Instrument, Drummer (as instrument), Stereo Out/Master ✅. Aux tracks (Track › New Aux Track, mixer strip, bus label) and Folder tracks (Create/Release Track Stack, fold arrow, folder M/S) ✅ in the app and `.prowave`. **Missing:** VCA, External MIDI, real bus routing (engine work); Folder summing is UI-only; >64 tracks share one engine slot |
-| Regions: audio (wav/aiff/caf/mp3/flac), MIDI, Pattern, Drummer | 🟡 | Audio WAV/AIFF/FLAC + MIDI regions ✅. **Missing:** CAF and MP3 decoding, Pattern regions, Drummer regions |
+| Transport: sample-accurate clock, tempo map, SMPTE sync | 🟡 | Engine tempo map with tempo + signature changes ✅. App: one tempo and one editable time signature (LCD drag), saved in `.prowave`, bars/beats/regions/grid/snap follow the signature (6/8 and 7/8 match the engine) ✅. Tempo track with curves, Signature track, SMPTE display via `TempoMap` with frame rate and start time, MTC out and chase ✅ (2026-10-21). **Missing:** MMC, trying MTC with hardware |
+| Track types: Audio, Instrument, Aux, Master, VCA, Folder/Summing Stacks, External MIDI | 🟡 | Audio, Instrument, Drummer (as instrument), Stereo Out/Master ✅. Aux tracks (Track › New Aux Track, mixer strip, bus label) and Folder tracks (Create/Release Track Stack, fold arrow, folder M/S) ✅ in the app and `.prowave`. VCA tracks and External MIDI tracks ✅ (2026-10-21). **Missing:** real bus routing (engine work); Folder summing is UI-only |
+| Regions: audio (wav/aiff/caf/mp3/flac), MIDI, Pattern, Drummer | 🟡 | Audio WAV/AIFF/FLAC/MP3/CAF + MIDI regions ✅. Pattern regions and Drummer regions ✅ (2026-10-21; no per-step Chance/Tie/Repeat, no Groove Track) |
 | Non-destructive editing: clip gain, fades, crossfades, reverse, normalize | ❌ | Only MIDI region parameters (quantize, transpose, velocity). **Missing:** all audio-region editing listed |
-| Disk streaming: memory-mapped + prefetch, 1000-track test | 🟡 | Background prefetch thread with per-clip rings ✅. **Missing:** memory mapping, 1000-track test |
+| Disk streaming: memory-mapped + prefetch, 1000-track test | 🟡 | Background prefetch thread with per-clip rings ✅, 1000-track streaming test ✅ (2026-10-21). Memory-mapped WAV/AIFF ✅ (2026-10-21, no speed gain, less private memory) |
 | Project file `.prowave` (zip, `project.json`, `media/`, `bounces/`) | 🟡 | Zip + JSON + `media/`, Open/Save/Save As, Open Recent, Save A Copy As, Revert to Saved, hardened loader ✅. Uses JSON, not `rkyv`. **Missing:** `bounces/` |
 | **DoD:** import 24 tracks 48 kHz/24-bit, play without dropouts | ❌ | Not tested yet |
 
@@ -255,7 +255,7 @@ arrangement (48 busy voices, filtered saw/square + vibrato, drums, metronome, te
 ### Phase 2 — MIDI & sequencer
 - [ ] MIDI input (hardware keyboards), MIDI file import/export, recording
 - [ ] Undo/Redo, Copy/Paste
-- [ ] Score Editor, Step Sequencer, Event List, MIDI Transform, MIDI FX (Arp, Chord Trigger…)
+- [ ] Score Editor (v0 ✅ 2026-10-21), Step Sequencer ✅, Event List ✅, MIDI Transform, MIDI FX (Transposer, Velocity, Scale, Chord, Repeater, Arpeggiator, Randomizer ✅; MIDI import/export ✅)
 - [ ] Drummer track generator
 
 ### Phase 3 — Flex & Smart Tempo

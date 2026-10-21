@@ -51,6 +51,8 @@ struct Step<'a> {
     name: &'a str,
     program: &'a str,
     args: Vec<&'a str>,
+    /// Extra environment variables for this step.
+    env: Vec<(&'a str, &'a str)>,
 }
 
 fn step<'a>(name: &'a str, program: &'a str, args: &[&'a str]) -> Step<'a> {
@@ -58,12 +60,17 @@ fn step<'a>(name: &'a str, program: &'a str, args: &[&'a str]) -> Step<'a> {
         name,
         program,
         args: args.to_vec(),
+        env: Vec::new(),
     }
 }
 
 fn run(s: &Step) -> bool {
     println!("\n==> {} ({} {})", s.name, s.program, s.args.join(" "));
-    match cmd(s.program).args(&s.args).status() {
+    match cmd(s.program)
+        .args(&s.args)
+        .envs(s.env.iter().copied())
+        .status()
+    {
         Ok(st) if st.success() => true,
         Ok(st) => {
             eprintln!("xtask: `{}` failed ({st})", s.name);
@@ -171,12 +178,20 @@ fn check() -> bool {
     if unsafe_crates.is_empty() {
         println!("xtask: no `unsafe` code in {MIRI_CRATES:?}; miri skipped");
     } else {
-        // Miri needs nightly; `rustup +nightly component add miri`.
+        // Miri needs nightly; `rustup +nightly component add miri`. It runs the lock-free
+        // triple buffer's tests (the engine's other `unsafe` is Windows FFI, which miri cannot
+        // run). On Windows the Stacked Borrows check trips over the test harness's own
+        // allocator on every test, so it is turned off there; data races are still checked.
         for c in unsafe_crates {
             steps.push(Step {
                 name: "miri",
                 program: "cargo",
-                args: vec!["+nightly", "miri", "test", "-p", c],
+                args: vec!["+nightly", "miri", "test", "-p", c, "--lib", "triple"],
+                env: if cfg!(windows) {
+                    vec![("MIRIFLAGS", "-Zmiri-disable-stacked-borrows")]
+                } else {
+                    Vec::new()
+                },
             });
         }
     }
@@ -219,6 +234,7 @@ fn check() -> bool {
             name: "wasm-pack",
             program: "wasm-pack",
             args: vec!["test", "--node", "crates/prowave-wasm"],
+            env: Vec::new(),
         });
     } else {
         println!("xtask: prowave-wasm not created yet; wasm-pack test skipped");

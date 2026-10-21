@@ -3,6 +3,45 @@
 What changed in each Pro Wave release. The release workflow copies the section of the version
 being released into the GitHub Release notes, so keep one `## <version>` heading per release.
 
+## 0.1.9
+
+### All systems (Windows, macOS, Linux)
+
+✅ **Several time signatures per song:** *Track > Show Signature Track*. Double-click to add a change at a bar, double-click a block to set it, drag it to another bar, right-click to delete it. The ruler, the grids, the Piano Roll, the Event list, the display and recording follow every change, and so does the engine (the metronome accents each bar). The display shows the signature at the playhead and edits it.
+✅ **Fade tool and crossfades:** the *Fade Tool* in the tool menu: drag the left half of an audio region for a fade in, the right half for a fade out. *Drag: X-Fade* (or the Inspector's *X-Fade* box) crossfades a region with the audio region it overlaps.
+✅ **VCA tracks:** *Track > New VCA Track*. A VCA moves the level of the tracks you give it in their *Group* slot, and its Mute and Solo reach them too.
+✅ **External MIDI tracks:** *Track > New External MIDI Track*. Pick a MIDI port and channel in the Inspector and the track's regions, and notes you play, go out to your synthesizer.
+✅ **MP3 and CAF audio:** drag them onto the window like WAV, AIFF and FLAC.
+✅ **1000 tracks:** the engine plays 1000 tracks (1000 audio tracks streamed for 20 seconds with no dropouts on the test PC), and the interface stays quick with them.
+✅ **Lower delay on Windows:** about 12 ms instead of 32 ms between Pro Wave and the speakers on the test PC (a sound card driver with smaller buffers can do better). If it cannot be used Pro Wave falls back to the old way by itself.
+✅ **Smoother meters and playhead:** the engine hands the playhead, the transport and every meter to the interface together, after each block of sound.
+✅ **Tempo curves:** right-click a point of the Tempo track > *Ramp to Next Tempo Change*. The tempo moves in a straight line to the next point, and the engine follows it.
+✅ **SMPTE and MIDI Time Code:** the time in the control bar follows every tempo change and curve; right-click it to pick the frame rate (24, 25, 29.97, 29.97 drop frame, 30), the start time, a MIDI port to *send* MIDI Time Code to, or a port to *follow* it from (the transport starts, jumps and stops with it).
+✅ **Pattern regions and Drummer regions:** *Track > New Pattern Region* and *New Drummer Region* (or double-click an empty stretch of a Drummer track). A pattern is a grid of steps with a velocity each; a Drummer plays Rock, Pop, Funk, Jazz, Hip Hop or Electronic, busier or calmer and louder or softer as you drag its pad, with fills and variations. *Convert to MIDI Region* makes them editable note by note.
+✅ **Memory-mapped audio files:** WAV and AIFF files are read straight from memory (the same samples as before). 1000 tracks take about a fifth less memory of their own.
+✅ **Step Sequencer extras:** each step of a pattern can have a *Chance*, a *Repeat* count and a *Tie*, and the pattern plays *Forward*, *Backward*, *Ping-Pong* or *Random*. The *Edit* box above the grid picks what a click sets.
+✅ **MIDI files:** *File > Import > MIDI File…* (or drop a `.mid` on the window) and *File > Export > Selection as MIDI File…*. The tempo changes and signatures go along.
+✅ **MIDI FX:** *Track > MIDI FX…*: Transposer, Velocity Processor, Scale Quantizer, Chord Trigger, Note Repeater, Arpeggiator, Randomizer, Modulator and Scripter, in a chain on the selected track.
+✅ **Modulator:** a sine, triangle, saw or square wave (its cycle in beats or bars, its depth) that moves a MIDI controller (any number, or pitch bend) of an External MIDI track while the song plays.
+✅ **Scripter:** write the processing of the notes yourself in a small script (Rhai). The script is checked as you type, runs in a sandbox and stops if it takes too long.
+✅ **MIDI Transform:** *Functions > MIDI Transform…* in the Piano Roll: pick the notes (all of them, or by pitch, velocity, position or length) and what to do to them (transpose, set or add velocity, shift, change length, scale, randomize). Presets: Transpose, Fixed Velocity, Legato, Humanize and more.
+✅ **Sustain pedal and controllers to your synthesizer:** the pedal of a MIDI region, and the Modulator, now go out to External MIDI tracks (and are let up when you stop).
+✅ **Score:** the *Score* tab of the editor shows a MIDI region as notation, with the treble and bass clefs, the key signature (pick the key at the top; minor keys too), the time signature, accidentals that last to the end of the bar, rests, and ties for notes that cross a bar line or are not one note value long. Click to add a note (in the key), right-click a note to delete it.
+
+✅ **Safer with odd files and devices:** a MIDI file with a huge number of notes, tempo changes or tracks, or with times far past the end of a song, no longer slows Pro Wave down or breaks it (files over 128 MB are refused), very long pattern regions and MIDI FX chains stop at a size limit instead of using all the memory, and a MIDI device that floods a port can no longer fill the memory. The interface does less work each frame for pattern and Drummer regions, the Score and the Tempo track.
+✅ **Tested with the pointer:** the Pattern grid, the Drummer pad, the Score and the MIDI FX window are now tried in automatic tests that click, drag and right-click like a person would.
+
+### Still to do or test
+
+❌ Several signatures: the Event list's *Signature* tab
+❌ MIDI Time Code has not been tried with real hardware; MIDI Machine Control is not there
+❌ Drummer regions: following a Groove Track
+❌ Score: beams, voices, chord symbols, printing and MusicXML; MIDI files: program changes, pitch bend and other controllers
+❌ External MIDI with a real synthesizer (checked with automated tests only), MIDI clock and program changes
+❌ VCA tracks: automation, and a VCA for the Master
+❌ Crossfades: a region wholly inside another, and *No Overlap* trimming
+❌ ASIO (built, but no ASIO driver to try it with)
+
 ## 0.1.8
 
 ### All systems (Windows, macOS, Linux)

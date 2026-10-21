@@ -1,6 +1,10 @@
 //! cpal output: owns the stream, the command producer and the shared state.
-use crate::core::{dsp_load, AudioClip, ClipEdit, Command, EngineCore, Garbage, Shared};
+use crate::core::{
+    dsp_load, AudioClip, ClipEdit, Command, EngineCore, EngineState, Garbage, MidiOutEvent, Shared,
+    StateReader,
+};
 use crate::disk::{AudioError, AudioFile, DiskThread};
+use crate::mtc::MtcMessage;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{
     BufferSize, Error, ErrorKind, FromSample, OutputCallbackInfo, SampleFormat, SizedSample,
@@ -117,14 +121,80 @@ pub fn peak_of(file: &AudioFile) -> Result<f32, EngineError> {
     file.peak().map_err(EngineError::from)
 }
 
+/// The running audio output. Dropping it stops the sound.
+enum Output {
+    Cpal(#[allow(dead_code)] Stream),
+    /// Windows: our own WASAPI stream with the smallest period the audio engine allows.
+    #[cfg(windows)]
+    Wasapi(#[allow(dead_code)] crate::wasapi::LowLatencyStream),
+}
+
 /// UI-thread handle. Not `Send` on some platforms (cpal `Stream`); keep it on the UI thread.
 pub struct Engine {
     commands: CommandQueue,
     shared: Arc<Shared>,
+    state: StateReader,
+    midi_out: Option<rtrb::Consumer<MidiOutEvent>>,
+    mtc_out: Option<rtrb::Consumer<MtcMessage>>,
     sample_rate: u32,
     device_name: String,
-    _stream: Stream,
+    _output: Output,
     disk: DiskThread,
+}
+
+/// Renders the engine into a device buffer of any sample format and channel count. Lives on
+/// the audio thread; never allocates after it is made.
+pub(crate) struct Renderer {
+    core: EngineCore,
+    shared: Arc<Shared>,
+    scratch: Vec<f32>,
+    channels: usize,
+    sample_rate: u32,
+}
+
+impl Renderer {
+    fn new(core: EngineCore, shared: Arc<Shared>, channels: usize, sample_rate: u32) -> Self {
+        Self {
+            core,
+            shared,
+            // Pre-allocated once, before the stream starts; the callback never allocates.
+            scratch: vec![0f32; MAX_BLOCK_FRAMES * 2],
+            channels: channels.max(1),
+            sample_rate,
+        }
+    }
+
+    /// Fills `data` (interleaved, `channels` per frame). `output_latency_us` is the delay from
+    /// now until the first frame is heard, if the device says.
+    pub(crate) fn fill<T: SizedSample + FromSample<f32>>(
+        &mut self,
+        data: &mut [T],
+        output_latency_us: u32,
+    ) {
+        // `Instant::now` reads the OS monotonic clock (no lock, no allocation).
+        let started = Instant::now();
+        let channels = self.channels;
+        self.core
+            .set_device_info((data.len() / channels) as u32, output_latency_us);
+        for chunk in data.chunks_mut(MAX_BLOCK_FRAMES * channels) {
+            let frames = chunk.len() / channels;
+            let buf = &mut self.scratch[..frames * 2];
+            let core = &mut self.core;
+            assert_no_alloc::assert_no_alloc(|| core.process(buf));
+            for (i, frame) in chunk.chunks_exact_mut(channels).enumerate() {
+                let (l, r) = (buf[i * 2], buf[i * 2 + 1]);
+                for (c, s) in frame.iter_mut().enumerate() {
+                    *s = T::from_sample(match c {
+                        0 => l,
+                        1 => r,
+                        _ => 0.0,
+                    });
+                }
+            }
+        }
+        let load = dsp_load(started.elapsed(), data.len() / channels, self.sample_rate);
+        self.shared.record_dsp_load(load);
+    }
 }
 
 impl Engine {
@@ -136,6 +206,15 @@ impl Engine {
     /// Like [`Engine::start`], but asks for `buffer_frames` per callback (clamped to what the
     /// device supports). Smaller buffers lower latency (Logic: I/O Buffer Size).
     pub fn start_with(buffer_frames: Option<u32>) -> Result<Self, EngineError> {
+        // Windows: the shared-mode audio engine's smallest period (often 2-3 ms instead of
+        // 10 ms) without taking the device away from other programs. cpal below otherwise.
+        #[cfg(windows)]
+        if std::env::var_os("PROWAVE_NO_LOW_LATENCY").is_none() {
+            match Self::start_wasapi(buffer_frames) {
+                Ok(engine) => return Ok(engine),
+                Err(e) => tracing::info!("low-latency output not available ({e}); using cpal"),
+            }
+        }
         let mut last = EngineError::NoOutputDevice;
         // The platform's default audio system first, then any other one that is available
         // (e.g. ALSA when a sound daemon is broken).
@@ -168,6 +247,48 @@ impl Engine {
         let host = cpal::host_from_id(cpal::HostId::Asio)
             .map_err(|error| EngineError::Backend(error.to_string()))?;
         Self::start_on_host(&host, buffer_frames)
+    }
+
+    #[cfg(windows)]
+    fn start_wasapi(buffer_frames: Option<u32>) -> Result<Self, EngineError> {
+        let (tx, rx) = RingBuffer::<Command>::new(1024);
+        let (gtx, grx) = RingBuffer::<Garbage>::new(GARBAGE_CAPACITY);
+        let shared = Arc::new(Shared::new());
+        let shared_rt = shared.clone();
+        let make = move |sample_rate: u32, channels: usize| {
+            let mut core = EngineCore::new(sample_rate, rx, gtx, shared_rt.clone());
+            let readers = core.take_readers();
+            (
+                Renderer::new(core, shared_rt, channels, sample_rate),
+                readers,
+            )
+        };
+        let (stream, info, readers) = crate::wasapi::LowLatencyStream::start(buffer_frames, make)
+            .map_err(EngineError::Backend)?;
+        let state = readers
+            .state
+            .ok_or_else(|| EngineError::Backend("no state reader".into()))?;
+        tracing::info!(
+            "audio output {} (WASAPI low latency, {} frames at {} Hz)",
+            info.device_name,
+            info.period_frames,
+            info.sample_rate
+        );
+        Ok(Self {
+            commands: CommandQueue {
+                tx,
+                garbage: grx,
+                credits: GARBAGE_CAPACITY,
+            },
+            shared,
+            state,
+            midi_out: readers.midi,
+            mtc_out: readers.mtc,
+            sample_rate: info.sample_rate,
+            device_name: info.device_name,
+            _output: Output::Wasapi(stream),
+            disk: DiskThread::spawn(),
+        })
     }
 
     fn start_on_host(host: &cpal::Host, buffer_frames: Option<u32>) -> Result<Self, EngineError> {
@@ -238,17 +359,22 @@ impl Engine {
         let (tx, rx) = RingBuffer::<Command>::new(1024);
         let (gtx, grx) = RingBuffer::<Garbage>::new(GARBAGE_CAPACITY);
         let shared = Arc::new(Shared::new());
-        let core = EngineCore::new(sample_rate, rx, gtx, shared.clone());
+        let mut core = EngineCore::new(sample_rate, rx, gtx, shared.clone());
+        let readers = core.take_readers();
+        let state = readers
+            .state
+            .ok_or_else(|| EngineError::Backend("no state reader".into()))?;
+        let renderer = Renderer::new(core, shared.clone(), config.channels as usize, sample_rate);
 
         let stream = match format {
-            SampleFormat::F32 => build::<f32>(device, config, core, shared.clone()),
-            SampleFormat::I16 => build::<i16>(device, config, core, shared.clone()),
-            SampleFormat::U16 => build::<u16>(device, config, core, shared.clone()),
-            SampleFormat::I32 => build::<i32>(device, config, core, shared.clone()),
-            SampleFormat::U32 => build::<u32>(device, config, core, shared.clone()),
-            SampleFormat::I8 => build::<i8>(device, config, core, shared.clone()),
-            SampleFormat::U8 => build::<u8>(device, config, core, shared.clone()),
-            SampleFormat::F64 => build::<f64>(device, config, core, shared.clone()),
+            SampleFormat::F32 => build::<f32>(device, config, renderer),
+            SampleFormat::I16 => build::<i16>(device, config, renderer),
+            SampleFormat::U16 => build::<u16>(device, config, renderer),
+            SampleFormat::I32 => build::<i32>(device, config, renderer),
+            SampleFormat::U32 => build::<u32>(device, config, renderer),
+            SampleFormat::I8 => build::<i8>(device, config, renderer),
+            SampleFormat::U8 => build::<u8>(device, config, renderer),
+            SampleFormat::F64 => build::<f64>(device, config, renderer),
             other => return Err(EngineError::UnsupportedSampleFormat(other.to_string())),
         }?;
         stream
@@ -261,9 +387,12 @@ impl Engine {
                 credits: GARBAGE_CAPACITY,
             },
             shared,
+            state,
+            midi_out: readers.midi,
+            mtc_out: readers.mtc,
             sample_rate,
             device_name,
-            _stream: stream,
+            _output: Output::Cpal(stream),
             disk: DiskThread::spawn(),
         })
     }
@@ -279,8 +408,24 @@ impl Engine {
         ok
     }
 
+    /// The MIDI the engine sends to external instruments, once: the app plays it out on the
+    /// tracks' ports. `None` after the first call.
+    pub fn take_midi_out(&mut self) -> Option<rtrb::Consumer<MidiOutEvent>> {
+        self.midi_out.take()
+    }
+
+    /// The MIDI Time Code the engine sends while [`Command::SetMtc`] has it on, once: the app
+    /// plays it out on the project's MTC port. `None` after the first call.
+    pub fn take_mtc_out(&mut self) -> Option<rtrb::Consumer<MtcMessage>> {
+        self.mtc_out.take()
+    }
+
     pub fn shared(&self) -> &Shared {
         &self.shared
+    }
+    /// The playhead, transport and meters after the newest audio block, all from that block.
+    pub fn state(&mut self) -> &EngineState {
+        self.state.read()
     }
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
@@ -291,7 +436,7 @@ impl Engine {
 
     /// Streams `file` from disk as an audio region on `track` starting at `start_beat`.
     /// Put the result in [`crate::Song::with_clips`] and send it with `Command::SetSong`.
-    pub fn stream_clip(&self, file: &AudioFile, track: u8, start_beat: f64) -> AudioClip {
+    pub fn stream_clip(&self, file: &AudioFile, track: u16, start_beat: f64) -> AudioClip {
         self.stream_clip_with(file, track, start_beat, ClipEdit::default())
     }
 
@@ -302,7 +447,7 @@ impl Engine {
     pub fn stream_clip_in(
         &self,
         file: &AudioFile,
-        track: u8,
+        track: u16,
         start_beat: f64,
         edit: ClipEdit,
         clips_in_song: usize,
@@ -322,7 +467,7 @@ impl Engine {
     pub fn stream_clip_with(
         &self,
         file: &AudioFile,
-        track: u8,
+        track: u16,
         start_beat: f64,
         edit: ClipEdit,
     ) -> AudioClip {
@@ -334,17 +479,12 @@ impl Engine {
 fn build<T>(
     device: &cpal::Device,
     config: StreamConfig,
-    mut core: EngineCore,
-    shared: Arc<Shared>,
+    mut renderer: Renderer,
 ) -> Result<Stream, EngineError>
 where
     T: SizedSample + FromSample<f32>,
 {
-    let channels = (config.channels as usize).max(1);
-    let sample_rate = config.sample_rate;
-    // Pre-allocated once, before the stream starts; the callback never allocates.
-    let mut scratch = vec![0f32; MAX_BLOCK_FRAMES * 2];
-    let shared_cb = shared.clone();
+    let shared = renderer.shared.clone();
     let err_fn = move |err: Error| match err.kind() {
         ErrorKind::Xrun => {
             shared.xruns.fetch_add(1, Ordering::Relaxed);
@@ -355,35 +495,13 @@ where
         .build_output_stream(
             config,
             move |data: &mut [T], info: &OutputCallbackInfo| {
-                // `Instant::now` reads the OS monotonic clock (no lock, no allocation).
-                let started = Instant::now();
                 let ts = info.timestamp();
                 let lat = ts
                     .playback
                     .duration_since(ts.callback)
                     .as_micros()
                     .min(u32::MAX as u128) as u32;
-                shared_cb.output_latency_us.store(lat, Ordering::Relaxed);
-                shared_cb
-                    .block_frames
-                    .store((data.len() / channels) as u32, Ordering::Relaxed);
-                for chunk in data.chunks_mut(MAX_BLOCK_FRAMES * channels) {
-                    let frames = chunk.len() / channels;
-                    let buf = &mut scratch[..frames * 2];
-                    assert_no_alloc::assert_no_alloc(|| core.process(buf));
-                    for (i, frame) in chunk.chunks_exact_mut(channels).enumerate() {
-                        let (l, r) = (buf[i * 2], buf[i * 2 + 1]);
-                        for (c, s) in frame.iter_mut().enumerate() {
-                            *s = T::from_sample(match c {
-                                0 => l,
-                                1 => r,
-                                _ => 0.0,
-                            });
-                        }
-                    }
-                }
-                let load = dsp_load(started.elapsed(), data.len() / channels, sample_rate);
-                shared_cb.record_dsp_load(load);
+                renderer.fill(data, lat);
             },
             err_fn,
             None,

@@ -392,9 +392,13 @@ fn by_icon(kind: IconKind, name: &str) -> SynthPatch {
         IconKind::Guitar => pluck(),
         IconKind::Strings => strings(),
         // Never played (these tracks have no notes); any patch will do.
-        IconKind::Mic | IconKind::Waveform | IconKind::Note | IconKind::Aux | IconKind::Folder => {
-            base()
-        }
+        IconKind::Mic
+        | IconKind::Waveform
+        | IconKind::Note
+        | IconKind::Aux
+        | IconKind::Folder
+        | IconKind::Vca
+        | IconKind::ExternalMidi => base(),
     }
 }
 

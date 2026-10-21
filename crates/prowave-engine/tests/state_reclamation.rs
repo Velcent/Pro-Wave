@@ -12,6 +12,7 @@ fn state_replacement_burst_does_not_allocate() {
     let (gtx, mut grx) = rtrb::RingBuffer::new(2);
     let shared = Arc::new(Shared::new());
     let mut core = EngineCore::new(48_000, rx, gtx, shared.clone());
+    let mut state = core.take_state_reader().expect("state reader");
     for i in 0..60 {
         let notes = vec![NoteEvent {
             start_beat: 0.0,
@@ -41,7 +42,7 @@ fn state_replacement_burst_does_not_allocate() {
     }
     assert_eq!(reclaimed, 60);
     assert!(
-        shared.position() > 0.0,
+        state.read().position_beats > 0.0,
         "transport resumes after the ordered edits"
     );
 }

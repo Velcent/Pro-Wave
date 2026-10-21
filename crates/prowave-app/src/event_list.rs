@@ -60,7 +60,6 @@ struct Event {
 /// in grey around them (Logic shows them as context, and while a take is recorded the notes
 /// of the earlier ones stay in view). With no region selected: all of the selected track's.
 fn events(p: &Project, s: &UiState) -> Vec<Event> {
-    let bpb = p.beats_per_bar();
     let (track, selected) = match s.tracks.selected {
         Some((t, r))
             if p.tracks
@@ -76,7 +75,7 @@ fn events(p: &Project, s: &UiState) -> Vec<Event> {
     };
     let mut out = Vec::new();
     for (ri, r) in track.regions.iter().enumerate() {
-        let offset = (r.start_bar as f64 - 1.0) * bpb;
+        let offset = p.region_start_beats(r);
         let dim = selected.is_some_and(|sr| sr != ri);
         for c in &r.controls {
             out.push(Event {
@@ -123,6 +122,14 @@ fn position_parts(beats: f64, bpb: f64) -> ([i64; 3], i64) {
         ],
         in_beat % TICKS_PER_DIVISION + 1,
     )
+}
+
+/// [`position_parts`] for a position in the song: bars have the length of their signature.
+fn position_in(p: &Project, beats: f64) -> ([i64; 3], i64) {
+    let bar0 = p.beats_to_bar(beats).floor();
+    let (mut parts, tick) = position_parts(beats - p.bar_to_beats(bar0), p.bar_len(bar0 as u32));
+    parts[0] += bar0 as i64;
+    (parts, tick)
 }
 
 /// A length as Logic shows it: bars, beats, divisions and ticks, all counted from zero.
@@ -186,7 +193,6 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let area = ui.max_rect();
     let g = ui.painter_at(area);
     g.rect_filled(area, 0.0, BG);
-    let bpb = p.beats_per_bar();
     let events = events(p, s);
 
     // Tabs: Event / Marker / Tempo / Signature (only the Event list exists so far).
@@ -397,8 +403,8 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let ink = Color32::from_gray(0xde);
     for (i, e) in events.iter().enumerate().take(last).skip(first) {
         let cy = list.top() + i as f32 * ROW_H - s.lists.scroll + ROW_H / 2.0;
-        let ([bar, beat, div], tick) = position_parts(e.beats, bpb);
-        let l = length_parts(e.len, bpb);
+        let ([bar, beat, div], tick) = position_in(p, e.beats);
+        let l = length_parts(e.len, p.bar_len_at(e.beats));
         let color = if e.dim { Color32::from_gray(0x76) } else { ink };
         let at = |x: f32, align: Align2, text: String| {
             gl.text(pos2(cx(x), cy), align, text, font.clone(), color);

@@ -30,13 +30,14 @@ fn main() {
     e.send(Command::Play);
     for _ in 0..8 {
         sleep(Duration::from_millis(250));
-        let (l, r) = e.shared().peaks();
+        let (st, xruns) = (
+            *e.state(),
+            e.shared().xruns.load(std::sync::atomic::Ordering::Relaxed),
+        );
+        let (l, r) = st.peaks;
         println!(
             "beat {:.2} peak {:.2}/{:.2} xruns {}",
-            e.shared().position(),
-            l,
-            r,
-            e.shared().xruns.load(std::sync::atomic::Ordering::Relaxed)
+            st.position_beats, l, r, xruns
         );
     }
 }

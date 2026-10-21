@@ -24,7 +24,7 @@ enum Action {
 }
 
 /// Draws the Marker track's `header` and `lane` and handles its editing. `x_of` / `beat_of`
-/// convert between beats and screen x as in the Tracks area; `step` is the snap in beats.
+/// convert between beats and screen x as in the Tracks area; `snap` snaps a position.
 pub fn show(
     ui: &mut Ui,
     p: &mut Project,
@@ -32,9 +32,8 @@ pub fn show(
     lane: Rect,
     x_of: impl Fn(f64) -> f32,
     beat_of: impl Fn(f32) -> f64,
-    step: f64,
+    snap: &dyn Fn(f64) -> f64,
 ) {
-    let snap = |b: f64| crate::tracks_area::snap_to(b, step);
     let rename_id = egui::Id::unique("marker_track_rename");
     let grab_id = egui::Id::unique("marker_track_grab");
 

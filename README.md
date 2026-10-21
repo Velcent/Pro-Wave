@@ -31,7 +31,7 @@ follows. ProWave contains no Apple code, artwork or sounds.
 - **Engine** (`prowave-engine`): sample-accurate transport with cycle, metronome and a tempo map;
   a lock-free command queue between UI and audio thread, with no allocations on the audio
   thread; a built-in subtractive synthesizer with drum-kit modes (48 voices); per-track volume,
-  pan, mute, solo and meters; WAV, AIFF and FLAC regions streamed from disk.
+  pan, mute, solo and meters; WAV, AIFF, FLAC, MP3 and CAF regions streamed from disk.
 - **Tracks area:** ruler, cycle band, playhead, track headers, MIDI and audio regions with
   waveforms; move, repeat and delete regions with snapping; per-track heights.
 - **Piano Roll:** draw, select, move, resize and delete notes; quantize (with strength and swing),

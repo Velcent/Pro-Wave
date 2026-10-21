@@ -13,6 +13,8 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant: Linux accessibility dependency via egui, no fix available" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names: Linux accessibility dependency via egui, no fix available" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: Linux accessibility dependency via egui, no fix available" },
+    # smartstring is unmaintained (not a vulnerability); it is used by rhai (the Scripter MIDI FX).
+    { id = "RUSTSEC-2026-0249", reason = "unmaintained, transitive via rhai, no fix available" },
 ]
 
 [licenses]
@@ -30,6 +32,8 @@ allow = [
     "Unlicense",
     "Unicode-3.0",
     "MPL-2.0",
+    # A public-domain dedication (tiny-keccak, via rhai's const-random).
+    "CC0-1.0",
     "OFL-1.1",
     # The list of trusted certificate authorities (webpki-roots / webpki-root-certs, pulled in
     # by the update check's HTTPS client). A permissive licence for data.
