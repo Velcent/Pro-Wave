@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FileCmd {
     New,
+    /// Closes the project and leaves a new, empty one.
+    Close,
     Open,
     Save,
     SaveAs,
@@ -37,9 +39,11 @@ impl FileCmd {
             FileCmd::Open => (Modifiers::COMMAND, Key::O),
             FileCmd::Save => (Modifiers::COMMAND, Key::S),
             FileCmd::SaveAs => (Modifiers::COMMAND | Modifiers::SHIFT, Key::S),
-            FileCmd::SaveCopy | FileCmd::Revert | FileCmd::OpenRecent | FileCmd::NewFrom(_) => {
-                return None
-            }
+            FileCmd::Close
+            | FileCmd::SaveCopy
+            | FileCmd::Revert
+            | FileCmd::OpenRecent
+            | FileCmd::NewFrom(_) => return None,
         };
         Some(KeyboardShortcut::new(modifiers, key))
     }
@@ -48,6 +52,7 @@ impl FileCmd {
     pub fn from_menu(label: &str) -> Option<Self> {
         match label {
             "New…" => Some(FileCmd::New),
+            "Close Project" => Some(FileCmd::Close),
             "Open…" => Some(FileCmd::Open),
             "Save" => Some(FileCmd::Save),
             "Save As…" => Some(FileCmd::SaveAs),
@@ -93,7 +98,11 @@ impl App {
     pub fn run_file_cmd(&mut self, cmd: FileCmd, ctx: &egui::Context) {
         let discards = matches!(
             cmd,
-            FileCmd::New | FileCmd::Open | FileCmd::OpenRecent | FileCmd::NewFrom(_)
+            FileCmd::New
+                | FileCmd::Close
+                | FileCmd::Open
+                | FileCmd::OpenRecent
+                | FileCmd::NewFrom(_)
         );
         if cmd == FileCmd::Revert {
             self.request_revert();
@@ -107,7 +116,7 @@ impl App {
 
     fn do_file_cmd(&mut self, cmd: FileCmd, ctx: &egui::Context) {
         match cmd {
-            FileCmd::New => self.replace(Project::empty(), None),
+            FileCmd::New | FileCmd::Close => self.replace(Project::empty(), None),
             FileCmd::NewFrom(t) => self.replace(t.project(), None),
             FileCmd::Open => {
                 if let Some(path) = dialog().set_title(tr("Open Project")).pick_file() {
@@ -380,6 +389,7 @@ mod tests {
     fn menu_entries_and_key_commands() {
         assert_eq!(FileCmd::from_menu("Save As…"), Some(FileCmd::SaveAs));
         assert_eq!(FileCmd::from_menu("Bounce"), None);
+        assert_eq!(FileCmd::from_menu("Close Project"), Some(FileCmd::Close));
         let save_as = FileCmd::SaveAs.shortcut().unwrap();
         assert!(save_as.modifiers.shift && save_as.logical_key == Key::S);
         assert!(!FileCmd::Save.shortcut().unwrap().modifiers.shift);
