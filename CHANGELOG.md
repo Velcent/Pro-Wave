@@ -3,15 +3,11 @@
 What changed in each Pro Wave release. The release workflow copies the section of the version
 being released into the GitHub Release notes, so keep one `## <version>` heading per release.
 
-## Unreleased
+## 0.1.9
 
 ### All systems (Windows, macOS, Linux)
 
 ✅ **Check for Updates on slow connections:** the check now tries three times, 30 seconds each, before it reports a timeout.
-
-## 0.1.9
-
-### All systems (Windows, macOS, Linux)
 
 ✅ **Several time signatures per song:** *Track > Show Signature Track*. Double-click to add a change at a bar, double-click a block to set it, drag it to another bar, right-click to delete it. The ruler, the grids, the Piano Roll, the Event list, the display and recording follow every change, and so does the engine (the metronome accents each bar). The display shows the signature at the playhead and edits it.
 ✅ **Fade tool and crossfades:** the *Fade Tool* in the tool menu: drag the left half of an audio region for a fade in, the right half for a fade out. *Drag: X-Fade* (or the Inspector's *X-Fade* box) crossfades a region with the audio region it overlaps.
