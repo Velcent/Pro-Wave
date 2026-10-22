@@ -250,6 +250,10 @@ Rules: small diffs, `cargo xtask check` green, one commit per finding.
    ✅ 0.1.9 (2026-10-21): all of the above plus MIDI Transform, Modulator, Scripter, sustain pedal
    and controllers to External MIDI, and the Score with clefs, key signatures, rests and ties.
    Also: Check for Updates retries on slow connections (3 tries of 30 s).
+   Also: File > Close Project, and the Flatpak can reach the network (Check for Updates failed
+   there with a name-resolution error).
+   ⚠️ CI: `xtask check` fails on Ubuntu and macOS since the 0.1.9 commit (Windows passes); cause
+   not found yet, the job logs need a GitHub login to read.
 4. Flex / Smart Tempo groundwork (Phases 2-3), real effects and buses.
 
 Engine items already done by ChatGPT 6 and reviewed on 2026-10-20: region gain, fades and
