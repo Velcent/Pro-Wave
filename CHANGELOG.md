@@ -7,6 +7,7 @@ being released into the GitHub Release notes, so keep one `## <version>` heading
 
 ### All systems (Windows, macOS, Linux)
 
+✅ **Flatpak can reach the network:** Check for Updates failed with "failed to lookup address information" in the Flatpak, whose sandbox had no network access.
 ✅ **Close Project:** *File > Close Project* now closes the project (after asking about unsaved changes) and leaves a new, empty one.
 ✅ **Check for Updates on slow connections:** the check now tries three times, 30 seconds each, before it reports a timeout.
 

@@ -10,6 +10,8 @@ sdk: org.freedesktop.Sdk
 command: prowave
 finish-args:
   - --share=ipc
+  # The update check and download talk to GitHub; without this the sandbox has no DNS.
+  - --share=network
   - --socket=fallback-x11
   - --socket=wayland
   - --device=dri
